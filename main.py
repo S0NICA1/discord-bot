@@ -44,7 +44,8 @@ class RoastBot(commands.Bot):
             for vc in guild.voice_channels:
                 for member in vc.members:
                     if not member.bot:
-                        self.vc_join_times[member.id] = time.time()
+                        # افتراض إن الشخص جالس 30 دقيقة لو ما نعرف وقت دخوله
+                        self.vc_join_times[member.id] = time.time() - 1800
 
     async def on_voice_state_update(self, member, before, after):
         if member.bot: return
@@ -70,7 +71,7 @@ class RoastBot(commands.Bot):
             print("No text channel found to send the roast.")
             return
 
-        join_time = self.vc_join_times.get(member.id, time.time())
+        join_time = self.vc_join_times.get(member.id, time.time() - 1800)
         minutes_in_vc = int((time.time() - join_time) / 60)
         
         game_info = "بدون لعبة"
