@@ -48,6 +48,16 @@ async def handle_stats(request):
                             activities.append({"type":"listening","name":act.name})
                         elif act.type == discord.ActivityType.custom:
                             custom_status = getattr(act,'name','') or getattr(act,'state','') or ''
+                    # حساب نسبة الكلام
+                    spk = bot.user_speak_history.get(m.id, {"unmuted_sec": 0, "last_unmute": 0})
+                    unmuted_time = spk["unmuted_sec"]
+                    if spk["last_unmute"] > 0:
+                        unmuted_time += (time.time() - spk["last_unmute"])
+                    
+                    speak_ratio = 0
+                    if mins > 0:
+                        speak_ratio = int((unmuted_time / (mins * 60)) * 100)
+
                     members_in_vc.append({
                         "id":m.id,"name":m.display_name,
                         "avatar":str(m.display_avatar.url),
@@ -58,6 +68,7 @@ async def handle_stats(request):
                         "streaming":m.voice.self_stream if m.voice else False,
                         "status":str(m.status),
                         "protected": m.id in bot.protected_users,
+                        "speak_ratio": speak_ratio
                     })
 
     # كل الأعضاء
@@ -119,7 +130,8 @@ async def handle_stats(request):
         "next_roast_in": next_roast_in,
         "interval_min": bot.roast_interval_min,
         "interval_max": bot.roast_interval_max,
-        "current_voice": getattr(bot, "current_voice", "Kore")
+        "current_voice": getattr(bot, "current_voice", "Kore"),
+        "current_persona": getattr(bot, "current_persona", "troll")
     }
     return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
 
@@ -205,6 +217,17 @@ async def handle_change_voice(request):
         voice = body.get("voice", "Kore")
         bot.current_voice = voice
         return web.Response(text=json.dumps({"ok":True,"voice":voice}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+
+
+async def handle_change_persona(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        persona = body.get("persona", "troll")
+        bot.current_persona = persona
+        return web.Response(text=json.dumps({"ok":True,"persona":persona}), content_type="application/json")
     except Exception as e:
         return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
@@ -443,7 +466,18 @@ input[type=range]{width:100%;accent-color:var(--accent)}
             </div>
           </div>
           <div class="form-group" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
-            <label>🎙️ صوت المشوي (تغيير صوت البوت)</label>
+            <label>🤖 شخصية البوت (يتغير أسلوب الذبة)</label>
+            <div style="display:flex;gap:.5rem; margin-bottom: .8rem">
+              <select id="persona-select" style="flex:1">
+                <option value="troll">الطقطوقي المروق (العادي)</option>
+                <option value="boomer">الشايب المعصّب (نصايح وتقريع)</option>
+                <option value="tryhard">المحترف الأجنبي (متعالي واسبورتس)</option>
+                <option value="psycho">المريض النفسي الغامض (مستفز وهادئ)</option>
+              </select>
+              <button class="btn btn-green btn-sm" onclick="changePersona()">🎭 تغيير</button>
+            </div>
+            
+            <label>🎙️ صوت البوت (يتغير بالروم)</label>
             <div style="display:flex;gap:.5rem">
               <select id="voice-select" style="flex:1">
                 <option value="Kore">Kore - صوت البارزة الهادئة</option>
@@ -620,8 +654,9 @@ async function loadData(){
     // Interval sliders
     document.getElementById('slider-min').value=D.interval_min;document.getElementById('lbl-min').textContent=D.interval_min;
     document.getElementById('slider-max').value=D.interval_max;document.getElementById('lbl-max').textContent=D.interval_max;
-    // Voice
+    // Settings
     if(D.current_voice) document.getElementById('voice-select').value = D.current_voice;
+    if(D.current_persona) document.getElementById('persona-select').value = D.current_persona;
 
     // Members in VC
     const ml=document.getElementById('members-list');
@@ -634,7 +669,12 @@ async function loadData(){
       if(m.games?.length)tags.push('<span class="badge badge-blue">🎮 '+m.games[m.games.length-1]+'</span>');
       if(m.custom_status)tags.push('<span class="badge badge-cyan">💬 '+m.custom_status+'</span>');
       if(m.protected)tags.push('<span class="badge badge-green">🛡️</span>');
-      return `<div class="member"><div class="member-avatar"><img src="${m.avatar}"><div class="status-dot status-${m.status||'offline'}"></div></div><div class="member-info"><div class="member-name">${m.name} ${tags.join(' ')}</div><div class="member-meta"><span>📍 ${m.channel}</span><span>⏱️ ${fmtDur(m.minutes)}</span></div></div></div>`;
+      
+      let spkTag = '';
+      if(m.speak_ratio > 70) spkTag = `<span title="مزعج الروم" style="font-size:.7rem; color:var(--accent);">🔊 يسولف واجد (${m.speak_ratio}%)</span>`;
+      else if(m.speak_ratio < 10 && m.minutes > 5 && !m.muted && !m.deafened) spkTag = `<span title="صنم" style="font-size:.7rem; color:var(--muted);">💤 صامت (${m.speak_ratio}%)</span>`;
+
+      return `<div class="member"><div class="member-avatar"><img src="${m.avatar}"><div class="status-dot status-${m.status||'offline'}"></div></div><div class="member-info"><div class="member-name">${m.name} ${tags.join(' ')}</div><div class="member-meta"><span>📍 ${m.channel}</span><span>⏱️ ${fmtDur(m.minutes)}</span> ${spkTag}</div></div></div>`;
     }).join('')}
 
     // Shame board
@@ -744,6 +784,14 @@ async function changeVoice(){
   if(d.ok){toast('تم تغيير صوت البوت لـ '+v+' 🎙️','ok');showMsg('voice-msg','✅ تم تغيير الصوت')}
 }
 
+async function changePersona(){
+  const p=document.getElementById('persona-select').value;
+  const pName=document.getElementById('persona-select').options[document.getElementById('persona-select').selectedIndex].text;
+  const r=await fetch('/api/change_persona',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({persona:p})});
+  const d=await r.json();
+  if(d.ok){toast('شخصية البوت صارت: '+pName+' 🎭','ok')}
+}
+
 async function addProtect(){
   const mid=document.getElementById('prot-select').value;
   if(!mid)return;
@@ -780,6 +828,7 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/targeted_roast",handle_targeted_roast)
     app.router.add_post("/api/change_interval",handle_change_interval)
     app.router.add_post("/api/change_voice",  handle_change_voice)
+    app.router.add_post("/api/change_persona",handle_change_persona)
     app.router.add_post("/api/protect",       handle_protect)
     return app
 

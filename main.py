@@ -57,6 +57,8 @@ class RoastBot(commands.Bot):
         self.roast_interval_min  = 120    # أدنى فترة (دقائق)
         self.roast_interval_max  = 240    # أقصى فترة (دقائق)
         self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
+        self.current_persona     = "troll" # شخصية البوت (troll, boomer, tryhard, psycho)
+        self.user_speak_history  = {}     # {user_id: {"unmuted_sec": 0, "last_unmute": 0}} لتتبع نسبة الكلام
         self._start_time         = time.time()
 
     # ─── Setup ────────────────────────────────────────────────────────────────
@@ -95,12 +97,35 @@ class RoastBot(commands.Bot):
             # تتبع أوقات الذروة (بتوقيت السعودية)
             saudi_hour = (time.gmtime().tm_hour + 3) % 24
             self.hourly_vc_activity[saudi_hour] += 1
+            if not before.channel and getattr(after, 'self_mute', False) is False:
+                # دخل الروم وهو من الأساس فاك المايك
+                self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": time.time()}
+            else:
+                self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": 0}
+
         elif before.channel is not None and after.channel is None:
+            # طلع من الفويس
             join_time = self.vc_join_times.pop(member.id, None)
+            spk = self.user_speak_history.pop(member.id, None)
             self.user_game_history.pop(member.id, None)
             if join_time:
                 mins = int((time.time() - join_time) / 60)
                 self.daily_stats[member.id] = self.daily_stats.get(member.id, 0) + mins
+
+        # تتبع الميوت / فك الميوت (لحساب نسبة السوالف)
+        if before.channel == after.channel and before.channel is not None:
+            spk = self.user_speak_history.setdefault(member.id, {"unmuted_sec": 0, "last_unmute": 0})
+            was_muted = getattr(before, 'self_mute', False) or getattr(before, 'mute', False)
+            is_muted = getattr(after, 'self_mute', False) or getattr(after, 'mute', False)
+
+            if was_muted and not is_muted:
+                # فك الميوت وبدأ يتكلم أو يسمع بصوت
+                spk["last_unmute"] = time.time()
+            elif not was_muted and is_muted:
+                # صك ميوت
+                if spk["last_unmute"] > 0:
+                    spk["unmuted_sec"] += (time.time() - spk["last_unmute"])
+                    spk["last_unmute"] = 0
 
     async def on_presence_update(self, before, after):
         if after.bot:
@@ -234,14 +259,34 @@ class RoastBot(commands.Bot):
         else:
             time_str = f"{minutes_in_vc} دقيقة"
 
-        # ─ الوقت بتوقيت السعودية
-        current_hour = (time.gmtime().tm_hour + 3) % 24
+        # ─ الوقت بتوقيت السعودية والموسم الحالي
+        import datetime
+        now = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+        current_hour = now.hour
+        current_month = now.month
+        current_day = now.weekday() # 0 = Monday, ..., 6 = Sunday
+
         if 2 <= current_hour <= 5:
             time_context = "آخر الليل / الفجر، المفروض نايم."
         elif 6 <= current_hour <= 11:
-            time_context = "الصبح بدري، الناس تداوم وهو مبلط بالديسكورد."
+            time_context = "الصبح بدري، الناس تداوم أو تدرس وهو مبلط بالديسكورد."
         else:
             time_context = "نص اليوم."
+
+        # الويكند
+        if current_day in [4, 5]: # الجمعة والسبت
+            time_context += " (ويكند والناس تطلع وتنبسط وهو مقابل الشاشة)."
+        else:
+            time_context += " (أيام دوامات والمفروض يخلص أشغاله)."
+
+        # المواسم التقريبية (تتغير حسب السنة، هنا أمثلة ثابتة يمكن تخصيصها)
+        # مثال: إذا كنا في شهر 2 أو 3 (موسم رمضان لعام 2024/2025/2026 مثلاً تقريبياً)
+        if current_month in [2, 3]:
+            time_context += " [ملاحظة للترند: حنا الحين في موسم قريب من رمضان أو أيام صيام، ذب عليه كيف يضيع وقته أو أنه فاطر!]"
+        elif current_month in [6, 7, 8]:
+            time_context += " [ملاحظة للترند: حنا بعز الصيف وحر الرياض/السعودية، والناس تسافر وهو مبلط بغرفته تحت المكيفيلعب!]"
+        elif current_month in [11, 12, 1]:
+            time_context += " [ملاحظة للترند: حنا بالشتاء والبرد وموسم كشتات ومخيمات، بس هو مكوش بغرفته يدفى من حرارة البي سي!]"
 
         # ─ الألعاب والحالة
         current_game  = None
@@ -292,8 +337,31 @@ class RoastBot(commands.Bot):
                     mute_info = "مسوي دفن (Deafen)، وضعية الصنم."
             elif vs.self_mute or vs.mute:
                 mute_info = "مسوي ميوت (Mute)، مكمبر ما يتكلم."
+            
+            # تحليل نسبة الكلام بناء على وقت الميوت
+            spk = self.user_speak_history.get(member.id, {"unmuted_sec": 0, "last_unmute": 0})
+            unmuted_time = spk["unmuted_sec"]
+            if spk["last_unmute"] > 0:
+                unmuted_time += (time.time() - spk["last_unmute"])
+            
+            total_time_sec = (minutes_in_vc * 60) or 1
+            speak_ratio = unmuted_time / total_time_sec
+            
+            if speak_ratio > 0.8:
+                mute_info += " (فاك المايك 80% من الوقت، يسولف واجد ومزعج الروم قرقرة!)."
+            elif speak_ratio < 0.2:
+                mute_info += " (قافل المايك أغلب وقته 80%، صنم جالس يسمع بس كأنه بودكاست!)."
 
-        # اختيار عشوائي للتركيز عشان ما تتكرر نفس نمط الذبة والأسلوب يكون متجدد
+        # الشخصية المطلوبة
+        persona_prompts = {
+            "troll": "شاب سعودي Gen Z، ذباتك قوية جداً وتكسر الجبهة، طقطوقي ومبدع وتستخدم لغة شارع وجيمنج معربة.",
+            "boomer": "شايب سعودي معصب وقلق، تعتبر الديسكورد والألعاب تضييع وقت وتفاهة، تذب عليهم أنهم جيل ضايع ولا يصلون ومقابلين الشاشات 24 ساعة.",
+            "tryhard": "لاعب إيسبورتس (Esports Tryhard) أجنبي متعالي بس تتكلم عربي مكسر/معرب، تحتقر لعبهم وتشوفهم 'نوبات' وارقامهم K/D فاشلة وأنهم عالة على اللعبة.",
+            "psycho": "شخصية غامضة ومريضة نفسياً، تذبيحاتك هادية بس مرعبة ومستفزة، تتكلم كأنك جني جالس معاهم بالروم ويراقب تفاصيلهم بصمت."
+        }
+        active_persona = persona_prompts.get(self.current_persona, persona_prompts["troll"])
+
+        # اختيار عشوائي للتركيز כדי ما تتكرر نفس نمط الذبة والأسلوب يكون متجدد
         focus_options = [
             "ركز على مدة جلوسه ووقت السهر كأنه ماعنده مستقبل ولا وظيفة.",
             "استلم اللعبة اللي يلعبها، ولو غيّر ألعابه اضحك على تشتته وإنه 'نوب' فيهم كلهم.",
@@ -308,11 +376,11 @@ class RoastBot(commands.Bot):
         focus = random.choice(focus_options)
 
         prompt = (
-            f"أنت بوت ديسكورد اسمه 'مستر ذبات'، شخصيتك شاب سعودي Gen Z، ذباتك قوية جداً، مبدع، ولا تكرر نفس الأسلوب.\n"
-            f"تستخدم لغة الشارع السعودي الجيمنج (عادي تستخدم كلمات إنجليزية أو معربة زي: Muted، AFK، Tryhard، نوب، سباون، بوت، تكمبر).\n"
+            f"أنت تلعب الآن هذا الدور بدقة: [{active_persona}]\n"
+            f"مهمتك: ذبة لاذعة جداً، لا تكرر أسلوبك القديم.\n"
             f"الضحية الحالية: '{member.display_name}'\n\n"
             f"--- معلومات مفصلة عن وضع الضحية الآن ---\n"
-            f"مقتطف الوقت والمدة: {time_str} ({time_context})\n"
+            f"وقت الجلوس: {time_str} ({time_context})\n"
             f"الألعاب: {game_info}\n"
             f"تناقض الحالة: {contradiction}\n"
             f"حالة الصوت: {mute_info}\n"
