@@ -32,6 +32,7 @@ class RoastBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.vc_join_times = {}  # Map user_id to join_timestamp
         self.last_roasted_user = None
+        self.user_game_history = {} # Map user_id to set of played games
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -53,10 +54,22 @@ class RoastBot(commands.Bot):
         # Joined a voice channel
         if before.channel is None and after.channel is not None:
             self.vc_join_times[member.id] = time.time()
+            self.user_game_history[member.id] = set()
         # Left a voice channel
         elif before.channel is not None and after.channel is None:
             if member.id in self.vc_join_times:
                 del self.vc_join_times[member.id]
+            if member.id in self.user_game_history:
+                del self.user_game_history[member.id]
+
+    async def on_presence_update(self, before, after):
+        if after.bot: return
+        if after.id in self.vc_join_times:
+            if after.id not in self.user_game_history:
+                self.user_game_history[after.id] = set()
+            for activity in after.activities:
+                if activity.type == discord.ActivityType.playing:
+                    self.user_game_history[after.id].add(activity.name)
 
     async def generate_roast_for_member(self, member: discord.Member, channel: discord.TextChannel = None):
         if not channel:
@@ -86,30 +99,84 @@ class RoastBot(commands.Bot):
         else:
             time_str = f"{minutes_in_vc} دقيقة"
         
-        game_info = "بدون لعبة"
+        
+        # 1. تحليل الوقت الفعلي (بتوقيت السعودية UTC+3)
+        current_hour = (time.gmtime().tm_hour + 3) % 24
+        time_context = ""
+        if 2 <= current_hour <= 5:
+            time_context = "الوقت الآن آخر الليل الفجر، المفروض نايم ووراه دوام أو مدرسة بس سهران زي البومة."
+        elif 6 <= current_hour <= 11:
+            time_context = "الوقت الآن الصبح بدري، الناس تداوم وتفطر وهو مبلط بالديسكورد."
+        else:
+            time_context = "جالس في نص اليوم."
+
+        # 2. تحليل الألعاب وحالة التناقض
+        current_game = None
+        custom_status = None
         for activity in member.activities:
             if activity.type == discord.ActivityType.playing:
-                game_info = f"ويلعب الآن {activity.name}"
-                break
-                
+                current_game = activity.name
+                if member.id in self.user_game_history:
+                    self.user_game_history[member.id].add(activity.name)
+            elif activity.type == discord.ActivityType.custom:
+                custom_status = activity.name
+
+        game_info = ""
+        played_games = self.user_game_history.get(member.id, set())
+        if current_game:
+            game_info = f"ويلعب الآن {current_game}."
+        elif len(played_games) > 1:
+            game_info = f"ما يلعب شيء حالياً، بس تراه من دخل وهو يغير ألعابه (لعب {', '.join(played_games)}) كأنه يفر بالريموت مو لاقي لعبة تضفه."
+        else:
+            game_info = "بدون لعبة، مسنتر على الفاضي."
+
+        contradiction_info = ""
+        if custom_status and current_game:
+            contradiction_info = f"تخيل إنه كاتب بحالته (Status) '{custom_status}'، ومع ذلك جالس يطقطق على {current_game}! تناقض غريب."
+
+        # 3. تحليل الدفن والميوت والبث والروم كم فيه شخص
         mute_info = ""
+        stream_info = ""
+        alone_info = ""
+        
         voice_state = member.voice
+        vc_channel = voice_state.channel if voice_state else None
+        
+        if vc_channel and len(vc_channel.members) == 1:
+            alone_info = "الأدهى والأمر إنه جالس بالروم لحـالـه! ماعنده أخويا أو محد معطيه وجه."
+
         if voice_state:
-            # الدفن يغطي على الميوت
+            if voice_state.self_stream:
+                stream_info = "وفاتح بث (Stream) بالشاشة! "
+                if vc_channel and len(vc_channel.members) == 1:
+                    stream_info += "والمصيبة فاتح بث بالروم ومافي أي أحد يتابعه، يبث للجن المتابعينه!"
+            
             if voice_state.self_deaf or voice_state.deaf:
-                mute_info = "ومسوي دفن (Deafen) للصوت والمايك، يعني وضعية الصنم"
+                if minutes_in_vc >= 120 and not current_game:
+                    mute_info = "يا ساتر! الرجال مسوي دفن (Deafen) للصوت والمايك له أكثر من سـاعتيـن ولا يلعب شيء! نايم على الكيبورد ولا متوفي؟"
+                else:
+                    mute_info = "ومسوي دفن (Deafen) للصوت والمايك، يعني وضعية الصنم والأصمخ."
             elif voice_state.self_mute or voice_state.mute:
-                mute_info = "ومسوي ميوت (Mute) للمايك"
+                mute_info = "ومسوي ميوت (Mute) للمايك، مكمبر ما يتكلم."
 
         prompt = (
             f"أنت بوت ديسكورد واسمك 'مستر ذبات'، وشخصيتك شاب سعودي Gen Z (جيل زد) ذباته قوية وتضحك وتكسر الجبهة. "
-            f"عندنا واحد بالديسكورد اسمه '{member.display_name}' "
-            f"مبلط بالروم الصوتي له {time_str}. {game_info}. {mute_info}.\n\n"
-            "مهم جداً:\n"
-            "- استخدم مصطلحات الديسكورد والقيمنق السعودية (مثل: مكمبر بالفويس، دفن، أصمخ، مسوي ميوت، طعس، سبك، يلعن أبو الجلوية، معرق، وضعية المزهرية).\n"
+            f"عندنا واحد بالديسكورد اسمه '{member.display_name}'.\n\n"
+            f"--- معلومات الضحية ---\n"
+            f"- مدة الجلوس: مبلط له {time_str}.\n"
+            f"- الوقت الحالي للمستخدم: {time_context}\n"
+            f"- الألعاب: {game_info}\n"
+            f"- الحالة (Status): {contradiction_info}\n"
+            f"- الصوت بالروم: {mute_info}\n"
+            f"- البث: {stream_info}\n"
+            f"- لحاله ولا معاه أحد؟: {alone_info}\n"
+            f"----------------------\n\n"
+            "المطلوب منك مستر ذبات:\n"
+            "- امسح بكرامته الأرض بناءً على التناقضات اللي في حالته أو سهرانه العجيب أو جلسته لحاله أو البث الميت حقه.\n"
+            "- استخدم مصطلحات الديسكورد والقيمنق السعودية (مثل: مكمبر، دفن، أصمخ، مسوي ميوت، طعس، سبك، يلعن أبو الجلوية، معرق، وضعية المزهرية، يبث للجدران).\n"
             "- الذبة لازم تكون سطر واحد أو سطرين بالكثير، عامية سعودية تيك توكر/تويتس بحتة تفطس وتستفز وتقهر.\n"
-            "- لا تعطيه أي نصيحة، بس طقطق عليه وامسح بكرامته الأرض بناءً على حالته (وقته، لعبته، الدفن أو الميوت).\n"
-            "- لا تكتب أي مقدمات أو شرح، فقط الذبة اللكمة بالصميم!"
+            "- لا تعطيه أي نصيحة، بس طقطق عليه.\n"
+            "- لا تكتب أي مقدمات أو شرح (زي 'إليك الذبة' أو غيره)، فقط الذبة اللكمة بالصميم!"
         )
         
         try:
