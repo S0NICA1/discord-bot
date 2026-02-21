@@ -5,6 +5,7 @@ import asyncio
 import io
 import struct
 import tempfile
+import traceback
 import wave
 import time
 import random
@@ -169,7 +170,8 @@ class RoastBot(commands.Bot):
         except asyncio.TimeoutError:
             print("TTS: تجاوز الوقت (60 ثانية)")
         except Exception as e:
-            print(f"Voice/TTS Error: {e}")
+            print(f"Voice/TTS Error [{type(e).__name__}]: {e}")
+            print(traceback.format_exc())
         finally:
             try:
                 if voice_client and voice_client.is_connected():
