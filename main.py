@@ -22,6 +22,7 @@ DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY")
 ADMIN_USER_ID   = int(os.getenv("ADMIN_USER_ID", 0))
 MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", 0))
+AFK_CHANNEL_ID  = 782986605148635166  # روم AFK - البوت يتجاهل الأعضاء فيه
 
 # Gemini clients
 client         = genai.Client(api_key=GEMINI_API_KEY)
@@ -40,11 +41,22 @@ intents.message_content = True
 class RoastBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        self.vc_join_times    = {}   # {user_id: join_timestamp}
+        self.vc_join_times     = {}   # {user_id: join_timestamp}
         self.last_roasted_user = None
-        self.user_game_history = {}  # {user_id: set of game names}
-        self.daily_stats       = {}  # {user_id: total_minutes_today}
-        self.roast_log         = []  # [(timestamp, member_name, roast_text)]  – kept for web dashboard
+        self.user_game_history = {}   # {user_id: set of game names}
+        self.daily_stats       = {}   # {user_id: total_minutes_today}
+        self.roast_log         = []   # [(timestamp, member_name, roast_text)]  – kept for web dashboard
+
+        # إحصائيات متقدمة للداشبورد
+        self.roast_count_per_user = {}  # {user_id: count} – لوحة العار
+        self.daily_roast_counts  = {}   # {"YYYY-MM-DD": count} – رسم بياني
+        self.hourly_vc_activity  = [0]*24  # [عدد الدخلات لكل ساعة] – أوقات الذروة
+        self.game_popularity     = {}   # {game_name: play_count} – ألعاب شعبية
+        self.protected_users     = set()  # قائمة الحماية
+        self.last_roast_time     = None   # آخر ذبة متى
+        self.roast_interval_min  = 120    # أدنى فترة (دقائق)
+        self.roast_interval_max  = 240    # أقصى فترة (دقائق)
+        self._start_time         = time.time()
 
     # ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -75,8 +87,13 @@ class RoastBot(commands.Bot):
         if member.bot:
             return
         if before.channel is None and after.channel is not None:
+            if after.channel.id == AFK_CHANNEL_ID:
+                return  # تجاهل روم AFK
             self.vc_join_times[member.id]    = time.time()
             self.user_game_history[member.id] = set()
+            # تتبع أوقات الذروة (بتوقيت السعودية)
+            saudi_hour = (time.gmtime().tm_hour + 3) % 24
+            self.hourly_vc_activity[saudi_hour] += 1
         elif before.channel is not None and after.channel is None:
             join_time = self.vc_join_times.pop(member.id, None)
             self.user_game_history.pop(member.id, None)
@@ -92,6 +109,8 @@ class RoastBot(commands.Bot):
             for activity in after.activities:
                 if activity.type == discord.ActivityType.playing:
                     self.user_game_history[after.id].add(activity.name)
+                    # تتبع شعبية الألعاب
+                    self.game_popularity[activity.name] = self.game_popularity.get(activity.name, 0) + 1
 
     # ─── TTS helpers ──────────────────────────────────────────────────────────
 
@@ -307,7 +326,14 @@ class RoastBot(commands.Bot):
 
             # سجّل آخر 20 ذبة للداشبورد
             self.roast_log.append((time.time(), member.display_name, roast_text))
-            self.roast_log = self.roast_log[-20:]
+            self.roast_log = self.roast_log[-100:]
+
+            # تحديث إحصائيات لوحة العار
+            self.roast_count_per_user[member.id] = self.roast_count_per_user.get(member.id, 0) + 1
+            import datetime
+            today = datetime.date.today().isoformat()
+            self.daily_roast_counts[today] = self.daily_roast_counts.get(today, 0) + 1
+            self.last_roast_time = time.time()
 
             # شغّل الصوت بالفويس
             if member.voice and member.voice.channel:
@@ -322,9 +348,13 @@ class RoastBot(commands.Bot):
         eligible = []
         for guild in self.guilds:
             for vc in guild.voice_channels:
+                if vc.id == AFK_CHANNEL_ID:
+                    continue  # تجاهل روم AFK
                 for member in vc.members:
                     if member.bot:
                         continue
+                    if member.id in self.protected_users:
+                        continue  # محمي من الذبات
                     tch = (
                         channel
                         or self.get_channel(MAIN_CHANNEL_ID)
@@ -347,6 +377,67 @@ class RoastBot(commands.Bot):
         member, tch = random.choice(eligible)
         await self.generate_roast_for_member(member, tch)
 
+    # ─── Send custom roast (من الداشبورد) ───────────────────────────────────
+
+    async def send_custom_roast(self, member_id: int, text: str):
+        """إرسال ذبة يدوية نيابة عن البوت."""
+        channel = self.get_channel(MAIN_CHANNEL_ID)
+        if not channel:
+            return False
+        try:
+            await channel.send(f"<@{member_id}> {text}")
+            # ابحث عن اسم العضو
+            member_name = str(member_id)
+            for guild in self.guilds:
+                m = guild.get_member(member_id)
+                if m:
+                    member_name = m.display_name
+                    break
+            self.roast_log.append((time.time(), member_name, text))
+            self.roast_log = self.roast_log[-100:]
+            self.roast_count_per_user[member_id] = self.roast_count_per_user.get(member_id, 0) + 1
+            self.last_roast_time = time.time()
+            return True
+        except Exception as e:
+            print(f"Custom roast error: {e}")
+            return False
+
+    # ─── Send free message (رسالة حرة) ──────────────────────────────────────
+
+    async def send_free_message(self, text: str):
+        """إرسال أي رسالة بالشات نيابة عن البوت."""
+        channel = self.get_channel(MAIN_CHANNEL_ID)
+        if not channel:
+            return False
+        try:
+            await channel.send(text)
+            return True
+        except Exception as e:
+            print(f"Free message error: {e}")
+            return False
+
+    # ─── Targeted roast (ذبة موجهة بالـ AI) ──────────────────────────────
+
+    async def targeted_roast(self, member_id: int):
+        """ذبة موجهة بالـ AI لعضو معين."""
+        for guild in self.guilds:
+            member = guild.get_member(member_id)
+            if member:
+                channel = self.get_channel(MAIN_CHANNEL_ID)
+                if channel:
+                    await self.generate_roast_for_member(member, channel)
+                    return True
+        return False
+
+    # ─── Change roast interval ────────────────────────────────────────
+
+    def change_interval(self, min_minutes: int, max_minutes: int):
+        self.roast_interval_min = max(30, min(min_minutes, 600))
+        self.roast_interval_max = max(self.roast_interval_min, min(max_minutes, 720))
+        if self.roast_loop.is_running():
+            self.roast_loop.change_interval(minutes=random.randint(self.roast_interval_min, self.roast_interval_max))
+        return self.roast_interval_min, self.roast_interval_max
+
     # ─── Toggle roast loop ────────────────────────────────────────────────────
 
     async def toggle_roast_loop(self):
@@ -359,9 +450,9 @@ class RoastBot(commands.Bot):
 
     # ─── Auto-roast loop ──────────────────────────────────────────────────────
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(hours=3)
     async def roast_loop(self):
-        self.roast_loop.change_interval(minutes=random.randint(10, 60))
+        self.roast_loop.change_interval(minutes=random.randint(self.roast_interval_min, self.roast_interval_max))
         await self.force_random_roast()
 
     @roast_loop.before_loop
