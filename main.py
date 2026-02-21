@@ -56,6 +56,7 @@ class RoastBot(commands.Bot):
         self.last_roast_time     = None   # آخر ذبة متى
         self.roast_interval_min  = 120    # أدنى فترة (دقائق)
         self.roast_interval_max  = 240    # أقصى فترة (دقائق)
+        self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
         self._start_time         = time.time()
 
     # ─── Setup ────────────────────────────────────────────────────────────────
@@ -125,7 +126,7 @@ class RoastBot(commands.Bot):
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name="Kore"
+                                voice_name=self.current_voice
                             )
                         )
                     )
@@ -265,13 +266,19 @@ class RoastBot(commands.Bot):
             if custom_status and current_game else ""
         )
 
-        # ─ الصوت والبث
+        # ─ الصوت والبث وأعضاء الروم
         mute_info = stream_info = alone_info = ""
+        other_members_info = ""
         vs = member.voice
         vc_ch = vs.channel if vs else None
 
-        if vc_ch and len([m for m in vc_ch.members if not m.bot]) == 1:
-            alone_info = "جالس بالروم لحاله! ما معاه أحد."
+        if vc_ch:
+            others = [m for m in vc_ch.members if not m.bot and m.id != member.id]
+            if len(others) == 0:
+                alone_info = "جالس بالروم لحاله! ما معاه أحد."
+            else:
+                other_names = " و ".join([f"'{m.display_name}'" for m in others])
+                other_members_info = f"موجودين معاه بالروم: {other_names}. (تقدر تستعين فيهم وتخليهم يشهدون على الذبة أو يضحكون عليه)"
 
         if vs:
             if vs.self_stream:
@@ -286,33 +293,35 @@ class RoastBot(commands.Bot):
             elif vs.self_mute or vs.mute:
                 mute_info = "مسوي ميوت (Mute)، مكمبر ما يتكلم."
 
-        # اختيار عشوائي للتركيز عشان ما تتكرر نفس نمط الذبة
+        # اختيار عشوائي للتركيز عشان ما تتكرر نفس نمط الذبة والأسلوب يكون متجدد
         focus_options = [
-            "ركز على مدة جلوسه ووقت السهر",
-            "ركز على اللعبة والألعاب اللي غيّرها",
-            "ركز على وضعه بالصوت (دفن أو ميوت أو صامت)",
-            "ركز على إنه جالس لحاله بالروم",
-            "ركز على التناقض بين حالته ولعبته",
-            "ركز على أنه يبث ومافي مشاهد",
-            "اطلق عليه ذبة مفاجئة من غير ما تتوقع"
+            "ركز على مدة جلوسه ووقت السهر كأنه ماعنده مستقبل ولا وظيفة.",
+            "استلم اللعبة اللي يلعبها، ولو غيّر ألعابه اضحك على تشتته وإنه 'نوب' فيهم كلهم.",
+            "ركز على وضعه بالصوت (دفن، ميوت). استهزئ بوضعية الصنم أو إنه خايف يتكلم.",
+            "إذا كان لحاله، اضحك على وحدته. وإذا معاه ناس (استخدم أسمائهم) حرّضهم عليه واستعين فيهم بالذبة.",
+            "قارن بين كلامه الفلسفي بحالته (Custom Status) وبين واقعه البائس بالألعاب.",
+            "ركز على البث إذا كان يبث، اضحك على إنه يبث لأشباح ومافي أحد مهتم.",
+            "أعطه ذبة غير متوقعة تماماً، تشبيه غريب يكسر الجبهة خارج عن المألوف.",
+            "سو نفسك مستغرب من وضعه وقدم له نصيحة ساخرة تقهره.",
+            "العب دور المحقق اللي كشف حقيقته ويفضحه قدام الموجودين بالروم."
         ]
         focus = random.choice(focus_options)
 
         prompt = (
-            f"أنت بوت ديسكورد 'مستر ذبات'، شخصيتك شاب سعودي Gen Z ذباته قوية تضحك وتكسر الجبهة.\n"
-            f"الضحية: '{member.display_name}'\n\n"
-            f"--- معلومات ---\n"
-            f"مدة الجلوس: {time_str}\n"
-            f"الوقت: {time_context}\n"
+            f"أنت بوت ديسكورد اسمه 'مستر ذبات'، شخصيتك شاب سعودي Gen Z، ذباتك قوية جداً، مبدع، ولا تكرر نفس الأسلوب.\n"
+            f"تستخدم لغة الشارع السعودي الجيمنج (عادي تستخدم كلمات إنجليزية أو معربة زي: Muted، AFK، Tryhard، نوب، سباون، بوت، تكمبر).\n"
+            f"الضحية الحالية: '{member.display_name}'\n\n"
+            f"--- معلومات مفصلة عن وضع الضحية الآن ---\n"
+            f"مقتطف الوقت والمدة: {time_str} ({time_context})\n"
             f"الألعاب: {game_info}\n"
-            f"التناقض بالحالة: {contradiction}\n"
-            f"الصوت: {mute_info}\n"
-            f"البث: {stream_info}\n"
-            f"لحاله؟: {alone_info}\n"
-            f"----------------\n\n"
-            f"تعليمات مهمة: {focus}\n"
-            "الذبة لازم تكون سطرين بالكثير، عامية سعودية تيك توكر/تويتس تفطس وتستفز. "
-            "بدون مقدمات أو شرح، فقط الذبة اللكمة!"
+            f"تناقض الحالة: {contradiction}\n"
+            f"حالة الصوت: {mute_info}\n"
+            f"حالة البث: {stream_info}\n"
+            f"وضعه بالروم: {alone_info}\n"
+            f"{other_members_info}\n"
+            f"----------------------------------------\n\n"
+            f"تعليمات إجبارية لهذه الذبة: [{focus}]\n"
+            "مهم جداً: خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
         )
 
         try:

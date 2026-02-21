@@ -119,6 +119,7 @@ async def handle_stats(request):
         "next_roast_in": next_roast_in,
         "interval_min": bot.roast_interval_min,
         "interval_max": bot.roast_interval_max,
+        "current_voice": getattr(bot, "current_voice", "Kore")
     }
     return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
 
@@ -196,6 +197,16 @@ async def handle_protect(request):
     except Exception as e:
         return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
+
+async def handle_change_voice(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        voice = body.get("voice", "Kore")
+        bot.current_voice = voice
+        return web.Response(text=json.dumps({"ok":True,"voice":voice}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
 # ─── HTML ────────────────────────────────────────────────────────────────
 
@@ -431,6 +442,20 @@ input[type=range]{width:100%;accent-color:var(--accent)}
               <button class="btn btn-red btn-sm" onclick="targetedRoast()">🎯 ذب</button>
             </div>
           </div>
+          <div class="form-group" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
+            <label>🎙️ صوت المشوي (تغيير صوت البوت)</label>
+            <div style="display:flex;gap:.5rem">
+              <select id="voice-select" style="flex:1">
+                <option value="Kore">Kore - صوت البارزة الهادئة</option>
+                <option value="Aoede">Aoede - صوت خفيف/طبيعي</option>
+                <option value="Puck">Puck - الجان المشاغب (مناسب للذبات)</option>
+                <option value="Fenrir">Fenrir - عميق وضخم</option>
+                <option value="Charon">Charon - هادئ ورزين</option>
+              </select>
+              <button class="btn btn-purple btn-sm" onclick="changeVoice()" style="background:var(--purple);color:#fff;border-color:var(--purple)">🎙️ تغيير</button>
+            </div>
+            <p id="voice-msg" style="font-size:.75rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
+          </div>
           <p id="status-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem"></p>
         </div>
       </div>
@@ -595,6 +620,8 @@ async function loadData(){
     // Interval sliders
     document.getElementById('slider-min').value=D.interval_min;document.getElementById('lbl-min').textContent=D.interval_min;
     document.getElementById('slider-max').value=D.interval_max;document.getElementById('lbl-max').textContent=D.interval_max;
+    // Voice
+    if(D.current_voice) document.getElementById('voice-select').value = D.current_voice;
 
     // Members in VC
     const ml=document.getElementById('members-list');
@@ -710,6 +737,13 @@ async function changeInterval(){
   if(d.ok){toast('تم تغيير الوقت: '+d.min+'–'+d.max+' دقيقة','ok')}
 }
 
+async function changeVoice(){
+  const v=document.getElementById('voice-select').value;
+  const r=await fetch('/api/change_voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:v})});
+  const d=await r.json();
+  if(d.ok){toast('تم تغيير صوت البوت لـ '+v+' 🎙️','ok');showMsg('voice-msg','✅ تم تغيير الصوت')}
+}
+
 async function addProtect(){
   const mid=document.getElementById('prot-select').value;
   if(!mid)return;
@@ -745,6 +779,7 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/free_message",  handle_free_message)
     app.router.add_post("/api/targeted_roast",handle_targeted_roast)
     app.router.add_post("/api/change_interval",handle_change_interval)
+    app.router.add_post("/api/change_voice",  handle_change_voice)
     app.router.add_post("/api/protect",       handle_protect)
     return app
 
