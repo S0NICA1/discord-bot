@@ -18,7 +18,7 @@ MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", 0))
 # Configure Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3-flash-preview"
-
+            
 # Configure Intents
 intents = discord.Intents.default()
 intents.voice_states = True
@@ -74,26 +74,42 @@ class RoastBot(commands.Bot):
         join_time = self.vc_join_times.get(member.id, time.time() - 1800)
         minutes_in_vc = int((time.time() - join_time) / 60)
         
+        if minutes_in_vc >= 60:
+            hours = minutes_in_vc // 60
+            mins = minutes_in_vc % 60
+            if hours == 1:
+                time_str = f"ساعة و {mins} دقيقة" if mins > 0 else "ساعة كاملة"
+            elif hours == 2:
+                time_str = f"ساعتين و {mins} دقيقة" if mins > 0 else "ساعتين كاملة"
+            else:
+                time_str = f"{hours} ساعات و {mins} دقيقة" if mins > 0 else f"{hours} ساعات"
+        else:
+            time_str = f"{minutes_in_vc} دقيقة"
+        
         game_info = "بدون لعبة"
         for activity in member.activities:
             if activity.type == discord.ActivityType.playing:
-                game_info = f"ويلعب الآن لعبة {activity.name}"
+                game_info = f"ويلعب الآن {activity.name}"
                 break
                 
         mute_info = ""
         voice_state = member.voice
         if voice_state:
-            if voice_state.self_mute or voice_state.mute:
-                mute_info = "ومسوي ميوت للصوت/المايك"
+            # الدفن يغطي على الميوت
             if voice_state.self_deaf or voice_state.deaf:
-                mute_info = "ومسوي ميوت وسماعة"
+                mute_info = "ومسوي دفن (Deafen) للصوت والمايك، يعني وضعية الصنم"
+            elif voice_state.self_mute or voice_state.mute:
+                mute_info = "ومسوي ميوت (Mute) للمايك"
 
         prompt = (
-            f"أنت خوينا في الديسكورد واسمك 'مستر ذبات'. اخويانا اسمه '{member.display_name}' "
-            f"وقاعد في الروم الصوتي له {minutes_in_vc} دقيقة. {game_info}. {mute_info}. \n"
-            "عطني ذبة أو طقطقة سعودية تضحك عليه وقصيرة جداً. ركز على اللعبة اللي يلعبها، أو إذا مسوي ميوت، "
-            "أو قعدته الطويلة. مثال: 'داخل فويس ومسوي ميوت؟ وش تحرس بالضبط؟'. "
-            "لا تكتب أي شيء غير الذبة نفسها، خلها عامية بحتة، تضحك وتمسح بكرامته الأرض."
+            f"أنت بوت ديسكورد واسمك 'مستر ذبات'، وشخصيتك شاب سعودي Gen Z (جيل زد) ذباته قوية وتضحك وتكسر الجبهة. "
+            f"عندنا واحد بالديسكورد اسمه '{member.display_name}' "
+            f"مبلط بالروم الصوتي له {time_str}. {game_info}. {mute_info}.\n\n"
+            "مهم جداً:\n"
+            "- استخدم مصطلحات الديسكورد والقيمنق السعودية (مثل: مكمبر بالفويس، دفن، أصمخ، مسوي ميوت، طعس، سبك، يلعن أبو الجلوية، معرق، وضعية المزهرية).\n"
+            "- الذبة لازم تكون سطر واحد أو سطرين بالكثير، عامية سعودية تيك توكر/تويتس بحتة تفطس وتستفز وتقهر.\n"
+            "- لا تعطيه أي نصيحة، بس طقطق عليه وامسح بكرامته الأرض بناءً على حالته (وقته، لعبته، الدفن أو الميوت).\n"
+            "- لا تكتب أي مقدمات أو شرح، فقط الذبة اللكمة بالصميم!"
         )
         
         try:
