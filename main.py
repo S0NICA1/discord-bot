@@ -55,6 +55,14 @@ class RoastBot(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user.name} ({self.user.id})")
+        # تحميل Opus عند البداية عشان تشتغل ميزة الفويس
+        for lib_name in ('libopus.so.0', 'libopus.so', 'opus', 'libopus-0.x86.dll', 'libopus-0.x64.dll'):
+            try:
+                discord.opus.load_opus(lib_name)
+                print(f"Opus loaded: {lib_name}")
+                break
+            except Exception:
+                continue
         for guild in self.guilds:
             for vc in guild.voice_channels:
                 for member in vc.members:
@@ -259,6 +267,18 @@ class RoastBot(commands.Bot):
             elif vs.self_mute or vs.mute:
                 mute_info = "مسوي ميوت (Mute)، مكمبر ما يتكلم."
 
+        # اختيار عشوائي للتركيز عشان ما تتكرر نفس نمط الذبة
+        focus_options = [
+            "ركز على مدة جلوسه ووقت السهر",
+            "ركز على اللعبة والألعاب اللي غيّرها",
+            "ركز على وضعه بالصوت (دفن أو ميوت أو صامت)",
+            "ركز على إنه جالس لحاله بالروم",
+            "ركز على التناقض بين حالته ولعبته",
+            "ركز على أنه يبث ومافي مشاهد",
+            "اطلق عليه ذبة مفاجئة من غير ما تتوقع"
+        ]
+        focus = random.choice(focus_options)
+
         prompt = (
             f"أنت بوت ديسكورد 'مستر ذبات'، شخصيتك شاب سعودي Gen Z ذباته قوية تضحك وتكسر الجبهة.\n"
             f"الضحية: '{member.display_name}'\n\n"
@@ -271,7 +291,8 @@ class RoastBot(commands.Bot):
             f"البث: {stream_info}\n"
             f"لحاله؟: {alone_info}\n"
             f"----------------\n\n"
-            "المطلوب: ذبة واحدة أو سطرين، عامية سعودية تيك توكر/تويتس، تفطس وتستفز وتقهر. "
+            f"تعليمات مهمة: {focus}\n"
+            "الذبة لازم تكون سطرين بالكثير، عامية سعودية تيك توكر/تويتس تفطس وتستفز. "
             "بدون مقدمات أو شرح، فقط الذبة اللكمة!"
         )
 
