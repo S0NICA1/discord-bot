@@ -123,40 +123,38 @@ class RoastBot(commands.Bot):
             print("TTS: لا يوجد صوت، تخطي دخول الفويس")
             return
         audio_bytes, mime_type = result
+        print(f"TTS: {len(audio_bytes)} bytes | {mime_type}")
 
         # لو البوت موصول بفويس ثاني نقطعه أول
         if member.guild.voice_client:
             await member.guild.voice_client.disconnect(force=True)
 
-        tmp_path    = None
         voice_client = None
         try:
-            import re
-            if 'mp3' in mime_type or 'mpeg' in mime_type:
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
-                    tmp_path = f.name
-                    f.write(audio_bytes)
-            elif 'pcm' in mime_type or 'L16' in mime_type or 'l16' in mime_type:
-                rate_m = re.search(r'rate=(\d+)', mime_type)
-                rate   = int(rate_m.group(1)) if rate_m else 24000
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                    tmp_path = f.name
-                with wave.open(tmp_path, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(rate)
-                    wf.writeframes(audio_bytes)
+            import re, audioop
+
+            # استخراج sample rate من mime_type (مثلاً audio/L16;rate=24000)
+            rate_m = re.search(r'rate=(\d+)', mime_type)
+            src_rate = int(rate_m.group(1)) if rate_m else 24000
+
+            # Discord يحتاج 48000Hz 16-bit stereo
+            if src_rate != 48000:
+                pcm_48k, _ = audioop.ratecv(audio_bytes, 2, 1, src_rate, 48000, None)
             else:
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                    tmp_path = f.name
-                    f.write(audio_bytes)
+                pcm_48k = audio_bytes
+
+            # تحويل mono → stereo
+            pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
+
+            # تشغيل الصوت بدون ffmpeg!
+            audio_io     = io.BytesIO(pcm_stereo)
+            audio_source = discord.PCMAudio(audio_io)
 
             print(f"TTS: اتصال بالروم '{vc_channel.name}'")
             voice_client = await vc_channel.connect()
 
-            audio_source = discord.FFmpegPCMAudio(tmp_path)
-            loop         = asyncio.get_event_loop()
-            finished     = asyncio.Event()
+            loop     = asyncio.get_event_loop()
+            finished = asyncio.Event()
 
             def after_play(error):
                 if error:
@@ -166,24 +164,19 @@ class RoastBot(commands.Bot):
             voice_client.play(audio_source, after=after_play)
             print("TTS: شغّل الصوت — ينتظر يخلص")
             await asyncio.wait_for(finished.wait(), timeout=60)
-            print("TTS: خلص الصوت")
+            print("TTS: خلص الصوت ✅")
 
         except asyncio.TimeoutError:
             print("TTS: تجاوز الوقت (60 ثانية)")
         except Exception as e:
             print(f"Voice/TTS Error: {e}")
         finally:
-            # دائماً يطلع من الفويس حتى لو صار خطأ
             try:
                 if voice_client and voice_client.is_connected():
                     await voice_client.disconnect(force=True)
             except Exception:
                 pass
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
+
 
 
     # ─── Roast generation ─────────────────────────────────────────────────────
