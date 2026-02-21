@@ -86,8 +86,8 @@ class RoastBot(commands.Bot):
 
     # ─── TTS helpers ──────────────────────────────────────────────────────────
 
-    async def generate_tts_audio(self, text: str) -> bytes | None:
-        """توليد صوت بنموذج Gemini TTS."""
+    async def generate_tts_audio(self, text: str) -> tuple[bytes, str] | None:
+        """توليد صوت بنموذج Gemini TTS. يرجع (bytes, mime_type) أو None."""
         try:
             response = await client.aio.models.generate_content(
                 model=TTS_MODEL_NAME,
@@ -97,13 +97,17 @@ class RoastBot(commands.Bot):
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name="Kore"   # صوت عربي طبيعي
+                                voice_name="Kore"
                             )
                         )
                     )
                 )
             )
-            return response.candidates[0].content.parts[0].inline_data.data
+            part      = response.candidates[0].content.parts[0]
+            audio_data = part.inline_data.data
+            mime_type  = part.inline_data.mime_type
+            print(f"TTS: {len(audio_data)} bytes | mime: {mime_type}")
+            return audio_data, mime_type
         except Exception as e:
             print(f"TTS generation error: {e}")
             return None
@@ -114,9 +118,10 @@ class RoastBot(commands.Bot):
             return
 
         vc_channel = member.voice.channel
-        audio_bytes = await self.generate_tts_audio(text)
-        if not audio_bytes:
+        result = await self.generate_tts_audio(text)
+        if not result:
             return
+        audio_bytes, mime_type = result
 
         # لو البوت موصول بفويس ثاني نقطعه أول
         if member.guild.voice_client:
@@ -124,29 +129,50 @@ class RoastBot(commands.Bot):
 
         tmp_path = None
         try:
-            # نكتب الصوت الخام بصيغة WAV (24kHz 16-bit mono وهو ما يرجعه Gemini)
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                tmp_path = f.name
-            with wave.open(tmp_path, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(24000)
-                wf.writeframes(audio_bytes)
+            import re
+            if 'mp3' in mime_type or 'mpeg' in mime_type:
+                ext = '.mp3'
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                    tmp_path = f.name
+                    f.write(audio_bytes)
+            elif 'pcm' in mime_type or 'L16' in mime_type or 'l16' in mime_type:
+                # PCM خام — نحتاج نضيف WAV header
+                rate_m = re.search(r'rate=(\d+)', mime_type)
+                rate   = int(rate_m.group(1)) if rate_m else 24000
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    tmp_path = f.name
+                with wave.open(tmp_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(rate)
+                    wf.writeframes(audio_bytes)
+            else:
+                # أي صيغة أخرى — نخليها لـ ffmpeg يحددها بنفسه
+                ext = '.wav'
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                    tmp_path = f.name
+                    f.write(audio_bytes)
 
             voice_client = await vc_channel.connect()
             audio_source = discord.FFmpegPCMAudio(tmp_path)
 
+            loop     = asyncio.get_event_loop()
             finished = asyncio.Event()
 
             def after_play(error):
                 if error:
                     print(f"Voice playback error: {error}")
-                finished.set()
+                # يجب استخدام call_soon_threadsafe لأن after_play يُنادى من thread آخر
+                loop.call_soon_threadsafe(finished.set)
 
             voice_client.play(audio_source, after=after_play)
-            await finished.wait()
+            await asyncio.wait_for(finished.wait(), timeout=60)
             await voice_client.disconnect()
 
+        except asyncio.TimeoutError:
+            print("TTS playback timed out")
+            if member.guild.voice_client:
+                await member.guild.voice_client.disconnect(force=True)
         except Exception as e:
             print(f"Voice/TTS Error: {e}")
         finally:
