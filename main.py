@@ -17,7 +17,7 @@ MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", 0))
 
 # Configure Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.0-flash"
 
 # Configure Intents
 intents = discord.Intents.default()
