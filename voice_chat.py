@@ -225,44 +225,45 @@ class VoiceChatSession:
     # ─── استقبال ردود Gemini ──────────────────────────────────────────
 
     async def _recv_loop(self):
-        """حلقة استقبال مستمرة لردود Gemini الصوتية."""
+        """حلقة استقبال مستمرة – تجمع كل قطع الصوت لكل turn ثم تشغلها دفعة واحدة."""
         try:
             while self.running:
                 try:
                     turn = self.live_session.receive()
+                    turn_audio = bytearray()  # تجميع كل الأجزاء الصوتية لهذا الـ turn
+
                     async for response in turn:
                         if not self.running:
                             return
 
-                        # استخلاص الصوت
-                        if response.data is not None:
-                            self._output_queue.put_nowait(response.data)
-                            self.messages_exchanged += 1
-                            self.last_activity = time.time()
-                            continue
-
-                        # طريقة بديلة: server_content
+                        # التحقق من المقاطعة
                         sc = getattr(response, "server_content", None)
-                        if sc and sc.model_turn:
-                            audio_buf = bytearray()
-                            for part in sc.model_turn.parts:
-                                if hasattr(part, "inline_data") and part.inline_data:
-                                    if isinstance(part.inline_data.data, bytes):
-                                        audio_buf.extend(part.inline_data.data)
-                            if audio_buf:
-                                self._output_queue.put_nowait(bytes(audio_buf))
-                                self.messages_exchanged += 1
-                                self.last_activity = time.time()
-
-                        # هل تم المقاطعة؟
                         if sc and getattr(sc, "interrupted", False):
+                            turn_audio.clear()
                             if self.voice_client and self.voice_client.is_playing():
                                 self.voice_client.stop()
                             while not self._output_queue.empty():
-                                try:
-                                    self._output_queue.get_nowait()
-                                except:
-                                    pass
+                                try: self._output_queue.get_nowait()
+                                except: pass
+                            continue
+
+                        # استخلاص الصوت من response.data (الطريقة الأساسية)
+                        if response.data is not None:
+                            turn_audio.extend(response.data)
+                            continue
+
+                        # طريقة بديلة: server_content.model_turn
+                        if sc and sc.model_turn:
+                            for part in sc.model_turn.parts:
+                                idata = getattr(part, "inline_data", None)
+                                if idata and isinstance(idata.data, bytes):
+                                    turn_audio.extend(idata.data)
+
+                    # بعد انتهاء الـ turn كامل، أرسل الصوت المجمّع للتشغيل
+                    if turn_audio:
+                        self._output_queue.put_nowait(bytes(turn_audio))
+                        self.messages_exchanged += 1
+                        self.last_activity = time.time()
 
                 except Exception as inner_e:
                     if self.running:
@@ -273,18 +274,22 @@ class VoiceChatSession:
             if self.running:
                 print(f"[VoiceChat] Recv loop error: {e}")
 
-    # ─── تشغيل الصوت بالديسكورد ──────────────────────────────────────
+    # ─── تشغيل الصوت بالديسكورد ─────────────────────────────────────────
 
     async def _play_loop(self):
-        """تشغيل أجزاء الصوت المستقبلة من Gemini في الفويس."""
+        """تشغيل المقاطع المجمعة من Gemini بالفويس."""
         while self.running:
             try:
                 data = await asyncio.wait_for(self._output_queue.get(), timeout=1.0)
                 self._is_playing = True
 
-                # Gemini يرسل 24kHz mono → نحول لـ 48kHz stereo لديسكورد
-                pcm_48k, _ = audioop.ratecv(data, 2, 1, 24000, 48000, None)
-                pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
+                # Gemini يرسل 24kHz mono 16-bit → نحول لـ 48kHz stereo لديسكورد
+                try:
+                    pcm_48k, _ = audioop.ratecv(data, 2, 1, 24000, 48000, None)
+                    pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
+                except Exception:
+                    self._is_playing = False
+                    continue
 
                 if self.voice_client and self.voice_client.is_connected():
                     src = discord.PCMAudio(io.BytesIO(pcm_stereo))
@@ -295,7 +300,7 @@ class VoiceChatSession:
                         src,
                         after=lambda e: self._loop.call_soon_threadsafe(finished.set),
                     )
-                    await asyncio.wait_for(finished.wait(), timeout=60)
+                    await asyncio.wait_for(finished.wait(), timeout=120)
 
                 self._is_playing = False
             except asyncio.TimeoutError:
