@@ -11,6 +11,7 @@ import time
 import discord
 from google import genai
 from google.genai import types
+import base64
 
 # محاولة تحميل مكتبة استقبال الصوت
 try:
@@ -177,40 +178,47 @@ class VoiceChatSession:
     async def _send_chunk(self, pcm):
         if self.live_session and self.running:
             try:
-                await self.live_session.send_realtime_input(
-                    audio={"data": pcm, "mime_type": "audio/pcm;rate=16000"}
-                )
+                # إرسال بيانات الصوت بصيغة pcm 16kHz كـ base64 أو bytes حسب قبول المكتبة
+                # نستخدم types.Part في genai
+                part = types.Part.from_bytes(data=pcm, mime_type="audio/pcm;rate=16000")
+                await self.live_session.send(input=part, end_of_turn=False)
             except Exception as e:
                 print(f"Send chunk error: {e}")
 
     # ─── استقبال رد Gemini ────────────────────────────────────────────
 
     async def _recv_gemini(self):
-        while self.running:
-            try:
-                turn = self.live_session.receive()
+        try:
+            async for resp in self.live_session.receive():
+                if not self.running:
+                    break
+                
+                sc = resp.server_content
+                if not sc:
+                    continue
+
                 audio_buf = bytearray()
-                async for resp in turn:
-                    if not self.running:
-                        break
-                    sc = resp.server_content
-                    if sc and sc.model_turn:
-                        for part in sc.model_turn.parts:
-                            if part.inline_data and isinstance(part.inline_data.data, bytes):
-                                audio_buf.extend(part.inline_data.data)
-                    if sc and getattr(sc, "interrupted", False):
-                        audio_buf.clear()
-                        if self.voice_client and self.voice_client.is_playing():
-                            self.voice_client.stop()
+                if sc.model_turn:
+                    for part in sc.model_turn.parts:
+                        if part.inline_data and isinstance(part.inline_data.data, bytes):
+                            audio_buf.extend(part.inline_data.data)
+                
+                if getattr(sc, "interrupted", False):
+                    if self.voice_client and self.voice_client.is_playing():
+                        self.voice_client.stop()
+                    # Clear any pending output
+                    while not self._output_queue.empty():
+                        try: self._output_queue.get_nowait()
+                        except: pass
 
                 if audio_buf:
                     self._output_queue.put_nowait(bytes(audio_buf))
                     self.messages_exchanged += 1
                     self.last_activity = time.time()
-            except Exception as e:
-                if self.running:
-                    print(f"Gemini recv error: {e}")
-                break
+                    
+        except Exception as e:
+            if self.running:
+                print(f"Gemini recv error: {e}")
 
     # ─── تشغيل الصوت ─────────────────────────────────────────────────
 

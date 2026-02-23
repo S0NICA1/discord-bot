@@ -272,7 +272,7 @@ class RoastBot(commands.Bot):
 
         # ─ الوقت بتوقيت السعودية والموسم الحالي
         import datetime
-        now = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
         current_hour = now.hour
         current_month = now.month
         current_day = now.weekday() # 0 = Monday, ..., 6 = Sunday
