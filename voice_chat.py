@@ -21,7 +21,7 @@ except ImportError:
     HAS_VOICE_RECV = False
     print("⚠️ discord-ext-voice-recv not installed – voice chat disabled")
 
-LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 _client = None
 
 def _get_client():
@@ -186,6 +186,7 @@ class VoiceChatSession:
 
     async def _run(self):
         try:
+            print("[VoiceChat] _run() started")
             voice_name = getattr(self.bot, "current_voice", "Kore")
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
@@ -196,8 +197,10 @@ class VoiceChatSession:
                 ),
                 system_instruction=self._build_system(),
             )
+            print(f"[VoiceChat] Config built, connecting to {LIVE_MODEL}...")
 
             client = _get_client()
+            print(f"[VoiceChat] Client ready, opening live session...")
             async with client.aio.live.connect(model=LIVE_MODEL, config=config) as session:
                 self.session = session
                 self.audio_in_queue = asyncio.Queue()
