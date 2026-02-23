@@ -249,7 +249,7 @@ class VoiceChatSession:
     # ─── Voice Data from Discord (sync callback) ──────────────────────
 
     def _on_voice_data(self, user, data):
-        """نفس فكرة listen_audio بالمثال الرسمي."""
+        """Sync callback – يشتغل من thread ثاني! لازم نستخدم call_soon_threadsafe."""
         if not self.running or user.bot or self._is_playing:
             return
         if user.id in getattr(self.bot, "voice_ignored_users", set()):
@@ -261,7 +261,6 @@ class VoiceChatSession:
         if self._active_speaker_id is None:
             self._active_speaker_id = user.id
             self._active_speaker = user
-            self._dbg("SPEAKER_LOCK", user.display_name)
 
         if user.id != self._active_speaker_id:
             return
@@ -275,9 +274,10 @@ class VoiceChatSession:
             raw = data.pcm if hasattr(data, "pcm") else bytes(data)
             pcm_mono = audioop.tomono(raw, 2, 1, 1)
             pcm_16k, _ = audioop.ratecv(pcm_mono, 2, 1, 48000, 16000, None)
-            # نفس طريقة المثال الرسمي: {"data": ..., "mime_type": "audio/pcm"}
-            if self.out_queue and not self.out_queue.full():
-                self.out_queue.put_nowait({"data": pcm_16k, "mime_type": "audio/pcm"})
+            msg = {"data": pcm_16k, "mime_type": "audio/pcm"}
+            # ⭐ الإصلاح الأساسي: call_soon_threadsafe لأن هذا callback من thread آخر
+            if self._loop and self.out_queue:
+                self._loop.call_soon_threadsafe(self.out_queue.put_nowait, msg)
         except Exception:
             pass
 
