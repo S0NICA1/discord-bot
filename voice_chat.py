@@ -308,6 +308,9 @@ class VoiceChatSession:
         """Sync callback من thread الفويس."""
         if not self.running or user.bot:
             return
+        # ⭐ لا تسمع أحد لما البوت يتكلم (يمنع المقاطعة)
+        if self._streaming_source and self._streaming_source.has_data():
+            return
         if user.id in getattr(self.bot, "voice_ignored_users", set()):
             return
 
@@ -374,12 +377,16 @@ class VoiceChatSession:
                                 if hasattr(part, "text") and part.text:
                                     text_parts += part.text
 
-                    # Turn complete – فرّغ الطابور (مقاطعة)
-                    while not self.audio_queue_output.empty():
-                        self.audio_queue_output.get_nowait()
-                    # فرّغ streaming source كمان
-                    if self._streaming_source:
-                        self._streaming_source.clear()
+                    # Turn complete – انتظر StreamingSource يخلص
+                    await asyncio.sleep(0.3)  # انتظر آخر chunks تتحول
+                    while self._streaming_source and self._streaming_source.has_data():
+                        await asyncio.sleep(0.2)
+
+                    # الحين فكّ القفل – أي شخص ثاني يقدر يتكلم
+                    old_speaker = self._active_speaker.display_name if self._active_speaker else "?"
+                    self._active_speaker_id = None
+                    self._active_speaker = None
+                    self._dbg("SPEAKER_UNLOCK", f"Released from {old_speaker}")
 
                     self.messages_exchanged += 1
                     self.last_activity = time.time()
@@ -419,12 +426,15 @@ class VoiceChatSession:
     # ─── Speaker Manager ──────────────────────────────────────────────
 
     async def _speaker_manager(self):
+        """فقط safety net – لو البوت علق ما يرد، يفك القفل بعد 30 ثانية."""
         while self.running:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2)
             if self._active_speaker_id:
-                if time.time() - self._speaker_silence > 3.0:
+                # safety: لو مافي نشاط لمدة 30 ثانية، فك القفل
+                if time.time() - self.last_activity > 30:
                     self._active_speaker_id = None
                     self._active_speaker = None
+                    self._dbg("SPEAKER_TIMEOUT", "30s safety release")
 
     # ─── Silence Watch ────────────────────────────────────────────────
 
