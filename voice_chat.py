@@ -22,7 +22,7 @@ except ImportError:
     HAS_VOICE_RECV = False
     print("⚠️ discord-ext-voice-recv not installed – voice chat disabled")
 
-NATIVE_AUDIO_MODEL = "gemini-2.5-flash-native-audio-preview"
+NATIVE_AUDIO_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 _client = None
 
 def _get_client():

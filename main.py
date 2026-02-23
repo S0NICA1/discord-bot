@@ -76,7 +76,8 @@ class RoastBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        self.roast_loop.start()
+        # الذبات مقفلة by default – افتحها من الداشبورد
+        # self.roast_loop.start()
         self.daily_report_loop.start()
 
     async def on_ready(self):
