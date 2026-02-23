@@ -1,7 +1,7 @@
 """
 voice_chat.py – محادثة صوتية تفاعلية لبوت مستر ذبات
 مبني على الكود الرسمي من Google:
-https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started_LiveAPI.py
+https://ai.google.dev/gemini-api/docs/live?example=mic-stream
 """
 import asyncio
 import audioop
@@ -9,6 +9,7 @@ import io
 import os
 import re
 import time
+import threading
 import traceback
 import discord
 from google import genai
@@ -24,17 +25,58 @@ except ImportError:
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 _client = None
 
+
 def _get_client():
     global _client
     if _client is None:
-        # مهم جداً: api_version v1beta مطلوب للـ Live API
-        _client = genai.Client(
-            http_options={"api_version": "v1beta"},
-            api_key=os.getenv("GEMINI_API_KEY"),
-        )
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     return _client
 
 
+# ─── Streaming Audio Source لديسكورد ──────────────────────────────────
+class StreamingSource(discord.AudioSource):
+    """
+    مصدر صوتي مستمر – ديسكورد يسحب منه frames بشكل مستمر.
+    نغذّيه بالصوت من Gemini و هو يشغله فوراً بدون فجوات.
+    """
+    FRAME_SIZE = 3840  # 20ms @ 48kHz stereo 16-bit
+
+    def __init__(self):
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._finished = False
+
+    def write(self, pcm_48k_stereo: bytes):
+        """أضف صوت للـ buffer (thread-safe)."""
+        with self._lock:
+            self._buffer.extend(pcm_48k_stereo)
+
+    def read(self) -> bytes:
+        """ديسكورد يسحب 20ms كل مرة."""
+        with self._lock:
+            if len(self._buffer) >= self.FRAME_SIZE:
+                frame = bytes(self._buffer[:self.FRAME_SIZE])
+                del self._buffer[:self.FRAME_SIZE]
+                return frame
+        # سكوت – صفر
+        return b'\x00' * self.FRAME_SIZE
+
+    def has_data(self):
+        with self._lock:
+            return len(self._buffer) > 0
+
+    def clear(self):
+        with self._lock:
+            self._buffer.clear()
+
+    def is_opus(self):
+        return False
+
+    def cleanup(self):
+        self._finished = True
+
+
+# ─── جلسة المحادثة الصوتية ────────────────────────────────────────────
 class VoiceChatSession:
     """جلسة محادثة صوتية – مبنية على المثال الرسمي من Google."""
 
@@ -53,15 +95,18 @@ class VoiceChatSession:
         self._loop = None
         self._tasks = []
 
-        # Queues – نفس تصميم المثال الرسمي
-        self.audio_in_queue = None    # صوت من Gemini → للتشغيل
-        self.out_queue = None         # صوت من المستخدم → لـ Gemini
+        # Queues – مطابقة للمثال الرسمي
+        self.audio_queue_output = asyncio.Queue()  # صوت من Gemini
+        self.audio_queue_mic = asyncio.Queue(maxsize=5)  # صوت من المستخدم
+
+        # Streaming source لديسكورد
+        self._streaming_source = None
+        self._is_playing = False
 
         # تحكم بالمتحدث
         self._active_speaker_id = None
         self._active_speaker = None
         self._speaker_silence = 0
-        self._is_playing = False
 
         # تتبع
         self.messages_exchanged = 0
@@ -91,8 +136,8 @@ class VoiceChatSession:
             "channel": self.voice_channel.name if self.voice_channel else "",
             "active_speaker": self._active_speaker.display_name if self._active_speaker else None,
             "is_playing": self._is_playing,
-            "out_queue_size": self.out_queue.qsize() if self.out_queue else 0,
-            "in_queue_size": self.audio_in_queue.qsize() if self.audio_in_queue else 0,
+            "mic_queue_size": self.audio_queue_mic.qsize() if self.audio_queue_mic else 0,
+            "output_queue_size": self.audio_queue_output.qsize() if self.audio_queue_output else 0,
             "audio_recv_count": self._audio_recv_count,
             "audio_send_count": self._audio_send_count,
             "gemini_recv_count": self._gemini_recv_count,
@@ -182,37 +227,46 @@ class VoiceChatSession:
             except:
                 pass
 
-    # ─── Main Session (مطابق للمثال الرسمي) ───────────────────────────
+    # ─── Main Session ─────────────────────────────────────────────────
 
     async def _run(self):
         try:
             print("[VoiceChat] _run() started")
             voice_name = getattr(self.bot, "current_voice", "Kore")
-            config = types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
+
+            # Config كـ dict – مطابق للمثال الرسمي
+            config = {
+                "response_modalities": ["AUDIO"],
+                "system_instruction": self._build_system(),
+                "speech_config": types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
                     )
                 ),
-                system_instruction=self._build_system(),
-            )
-            print(f"[VoiceChat] Config built, connecting to {LIVE_MODEL}...")
+            }
 
+            print(f"[VoiceChat] Connecting to {LIVE_MODEL}...")
             client = _get_client()
-            print(f"[VoiceChat] Client ready, opening live session...")
+
             async with client.aio.live.connect(model=LIVE_MODEL, config=config) as session:
                 self.session = session
-                self.audio_in_queue = asyncio.Queue()
-                self.out_queue = asyncio.Queue(maxsize=5)
+                print("[VoiceChat] ✅ Gemini session connected!")
 
+                # بدء الاستماع
                 if HAS_VOICE_RECV and hasattr(self.voice_client, "listen"):
                     self.voice_client.listen(voice_recv.BasicSink(self._on_voice_data))
+                    print("[VoiceChat] ✅ Voice listening started")
+
+                # بدء Streaming Source لديسكورد (play مرة واحدة فقط!)
+                self._streaming_source = StreamingSource()
+                if self.voice_client and self.voice_client.is_connected():
+                    self.voice_client.play(self._streaming_source)
+                    print("[VoiceChat] ✅ Streaming source playing")
 
                 self._tasks = [
                     asyncio.create_task(self._send_realtime()),
                     asyncio.create_task(self._receive_audio()),
-                    asyncio.create_task(self._play_audio()),
+                    asyncio.create_task(self._feed_streaming()),
                     asyncio.create_task(self._speaker_manager()),
                     asyncio.create_task(self._silence_watch()),
                 ]
@@ -239,6 +293,8 @@ class VoiceChatSession:
                 t.cancel()
             if self.voice_client and self.voice_client.is_connected():
                 try:
+                    if self.voice_client.is_playing():
+                        self.voice_client.stop()
                     if hasattr(self.voice_client, "stop_listening"):
                         self.voice_client.stop_listening()
                     await self.voice_client.disconnect(force=True)
@@ -249,8 +305,8 @@ class VoiceChatSession:
     # ─── Voice Data from Discord (sync callback) ──────────────────────
 
     def _on_voice_data(self, user, data):
-        """Sync callback – يشتغل من thread ثاني! لازم نستخدم call_soon_threadsafe."""
-        if not self.running or user.bot or self._is_playing:
+        """Sync callback من thread الفويس."""
+        if not self.running or user.bot:
             return
         if user.id in getattr(self.bot, "voice_ignored_users", set()):
             return
@@ -275,27 +331,29 @@ class VoiceChatSession:
             pcm_mono = audioop.tomono(raw, 2, 1, 1)
             pcm_16k, _ = audioop.ratecv(pcm_mono, 2, 1, 48000, 16000, None)
             msg = {"data": pcm_16k, "mime_type": "audio/pcm"}
-            # ⭐ الإصلاح الأساسي: call_soon_threadsafe لأن هذا callback من thread آخر
-            if self._loop and self.out_queue:
-                self._loop.call_soon_threadsafe(self.out_queue.put_nowait, msg)
+            # ⭐ thread-safe: schedule على event loop
+            if self._loop and self.audio_queue_mic:
+                self._loop.call_soon_threadsafe(self.audio_queue_mic.put_nowait, msg)
+        except asyncio.QueueFull:
+            pass  # تجاهل لو الطابور ممتلئ
         except Exception:
             pass
 
-    # ─── Send to Gemini (مطابق للمثال الرسمي: send_realtime) ──────────
+    # ─── Send to Gemini (مطابق للمثال الرسمي) ────────────────────────
 
     async def _send_realtime(self):
-        """نفس send_realtime بالمثال الرسمي."""
+        """send_realtime_input – نفس المثال الرسمي بالضبط."""
         while self.running:
-            if self.out_queue is not None:
-                msg = await self.out_queue.get()
+            try:
+                msg = await self.audio_queue_mic.get()
                 if self.session is not None:
-                    try:
-                        await self.session.send(input=msg)
-                        self._audio_send_count += 1
-                    except Exception as e:
-                        self._dbg("SEND_ERROR", str(e))
+                    await self.session.send_realtime_input(audio=msg)
+                    self._audio_send_count += 1
+            except Exception as e:
+                if self.running:
+                    self._dbg("SEND_ERROR", str(e))
 
-    # ─── Receive from Gemini (مطابق للمثال الرسمي: receive_audio) ─────
+    # ─── Receive from Gemini (مطابق للمثال الرسمي) ───────────────────
 
     async def _receive_audio(self):
         """نفس receive_audio بالمثال الرسمي بالضبط."""
@@ -307,22 +365,26 @@ class VoiceChatSession:
                     async for response in turn:
                         if not self.running:
                             return
-                        if data := response.data:
-                            self.audio_in_queue.put_nowait(data)
-                            self._gemini_recv_count += 1
-                            continue
-                        if text := response.text:
-                            text_parts += text
+                        # استخلاص الصوت – مطابق للمثال الرسمي
+                        if (response.server_content and response.server_content.model_turn):
+                            for part in response.server_content.model_turn.parts:
+                                if part.inline_data and isinstance(part.inline_data.data, bytes):
+                                    self.audio_queue_output.put_nowait(part.inline_data.data)
+                                    self._gemini_recv_count += 1
+                                if hasattr(part, "text") and part.text:
+                                    text_parts += part.text
 
-                    # Turn complete – مقاطعة: نفرغ الطابور
-                    while not self.audio_in_queue.empty():
-                        self.audio_in_queue.get_nowait()
+                    # Turn complete – فرّغ الطابور (مقاطعة)
+                    while not self.audio_queue_output.empty():
+                        self.audio_queue_output.get_nowait()
+                    # فرّغ streaming source كمان
+                    if self._streaming_source:
+                        self._streaming_source.clear()
 
                     self.messages_exchanged += 1
                     self.last_activity = time.time()
                     self._dbg("TURN_COMPLETE", f"text: '{text_parts[:100]}'")
 
-                    # أوامر صوتية
                     if text_parts:
                         await self._handle_voice_commands(text_parts)
 
@@ -331,73 +393,38 @@ class VoiceChatSession:
                     self._dbg("RECV_ERROR", str(e))
                 await asyncio.sleep(0.5)
 
-    # ─── Play Audio (مطابق للمثال الرسمي: play_audio) ─────────────────
+    # ─── Feed Streaming Source (يحوّل ويغذّي الـ source فوراً) ────────
 
-    async def _play_audio(self):
-        """نفس play_audio بالمثال الرسمي – تشغيل كل chunk لحظة وصوله."""
+    async def _feed_streaming(self):
+        """يأخذ chunks من audio_queue_output ويحولها ويغذّي الـ StreamingSource."""
         while self.running:
             try:
-                if self.audio_in_queue is not None:
-                    # انتظر chunk صوتي
-                    try:
-                        chunk_24k = await asyncio.wait_for(self.audio_in_queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        continue
+                # انتظر chunk صوتي من Gemini (24kHz mono)
+                chunk_24k = await asyncio.wait_for(self.audio_queue_output.get(), timeout=1.0)
 
-                    self._is_playing = True
+                # تحويل 24kHz mono → 48kHz stereo
+                pcm_48k, _ = audioop.ratecv(chunk_24k, 2, 1, 24000, 48000, None)
+                pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
 
-                    # تحويل 24kHz mono → 48kHz stereo لديسكورد
-                    try:
-                        pcm_48k, _ = audioop.ratecv(chunk_24k, 2, 1, 24000, 48000, None)
-                        pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
-                    except Exception:
-                        self._is_playing = False
-                        continue
-
-                    # اجمع أي chunks إضافية متاحة
-                    while not self.audio_in_queue.empty():
-                        try:
-                            extra = self.audio_in_queue.get_nowait()
-                            pcm_48k_e, _ = audioop.ratecv(extra, 2, 1, 24000, 48000, None)
-                            pcm_stereo += audioop.tostereo(pcm_48k_e, 2, 1, 1)
-                        except:
-                            break
-
-                    # تشغيل
-                    if self.voice_client and self.voice_client.is_connected():
-                        src = discord.PCMAudio(io.BytesIO(pcm_stereo))
-                        if self.voice_client.is_playing():
-                            self.voice_client.stop()
-                        finished = asyncio.Event()
-                        self.voice_client.play(
-                            src,
-                            after=lambda e: self._loop.call_soon_threadsafe(finished.set),
-                        )
-                        await asyncio.wait_for(finished.wait(), timeout=30)
-
-                    self._is_playing = False
-                    # بعد التشغيل – يفك القفل
-                    self._active_speaker_id = None
-                    self._active_speaker = None
+                # غذّي الـ streaming source – يتشغل فوراً!
+                if self._streaming_source:
+                    self._streaming_source.write(pcm_stereo)
 
             except asyncio.TimeoutError:
-                self._is_playing = False
+                continue
             except Exception as e:
-                self._is_playing = False
                 if self.running:
-                    self._dbg("PLAY_ERROR", str(e))
+                    self._dbg("FEED_ERROR", str(e))
 
     # ─── Speaker Manager ──────────────────────────────────────────────
 
     async def _speaker_manager(self):
         while self.running:
             await asyncio.sleep(0.5)
-            if self._active_speaker_id and not self._is_playing:
+            if self._active_speaker_id:
                 if time.time() - self._speaker_silence > 3.0:
-                    old = self._active_speaker.display_name if self._active_speaker else "?"
                     self._active_speaker_id = None
                     self._active_speaker = None
-                    self._dbg("SPEAKER_RELEASE", old)
 
     # ─── Silence Watch ────────────────────────────────────────────────
 
@@ -446,6 +473,8 @@ class VoiceChatSession:
 
         if self.voice_client and self.voice_client.is_connected():
             try:
+                if self.voice_client.is_playing():
+                    self.voice_client.stop()
                 if hasattr(self.voice_client, "stop_listening"):
                     self.voice_client.stop_listening()
                 await self.voice_client.disconnect(force=True)
@@ -454,13 +483,12 @@ class VoiceChatSession:
 
         dur = max(1, int((time.time() - self.start_time) / 60))
         parts = "، ".join(self.participants) if self.participants else "ما حد"
-        summary = (
-            f"📝 **ملخص الجلسة:**\n"
-            f"⏱️ المدة: {dur} دقيقة | 👥 المشاركين: {parts}\n"
-            f"💬 عدد الردود: {self.messages_exchanged} | 📌 سبب الخروج: {reason}"
-        )
         try:
-            await self.text_channel.send(summary)
+            await self.text_channel.send(
+                f"📝 **ملخص الجلسة:**\n"
+                f"⏱️ {dur} دقيقة | 👥 {parts}\n"
+                f"💬 {self.messages_exchanged} ردود | 📌 {reason}"
+            )
         except:
             pass
 
