@@ -22,7 +22,8 @@ except ImportError:
     HAS_VOICE_RECV = False
     print("⚠️ discord-ext-voice-recv not installed – voice chat disabled")
 
-NATIVE_AUDIO_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+# موديل المحادثة الصوتية
+LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 _client = None
 
 def _get_client():
@@ -48,11 +49,9 @@ class VoiceChatSession:
         self.last_activity = time.time()
         self.start_time = time.time()
         self._tasks = []
-        self._audio_buffer = bytearray()  # streaming buffer
-        self._buffer_lock = asyncio.Lock()
-        self._new_audio = asyncio.Event()  # إشارة وصول صوت جديد
+        self._output_queue = asyncio.Queue()  # قطع صوتية جاهزة للتشغيل
+        self._input_buffer = bytearray()  # تجميع صوت المستخدم قبل الإرسال
         self._is_playing = False
-        self._turn_done = asyncio.Event()  # إشارة انتهاء الـ turn
         self._loop = None  # سيتم تعيينه عند التشغيل
 
         # تتبع
@@ -146,7 +145,7 @@ class VoiceChatSession:
 
             client = _get_client()
             async with client.aio.live.connect(
-                model=NATIVE_AUDIO_MODEL, config=config
+                model=LIVE_MODEL, config=config
             ) as session:
                 self.live_session = session
                 self.last_activity = time.time()
@@ -160,6 +159,7 @@ class VoiceChatSession:
                     asyncio.create_task(self._recv_loop()),
                     asyncio.create_task(self._play_loop()),
                     asyncio.create_task(self._silence_watch()),
+                    asyncio.create_task(self._send_batch_loop()),
                 ]
 
                 try:
@@ -203,56 +203,58 @@ class VoiceChatSession:
         self.last_activity = time.time()
 
         try:
-            # data.pcm هو bytes بصيغة PCM 48kHz 16-bit stereo
             raw = data.pcm if hasattr(data, "pcm") else bytes(data)
             pcm_mono = audioop.tomono(raw, 2, 1, 1)
             pcm_16k, _ = audioop.ratecv(pcm_mono, 2, 1, 48000, 16000, None)
-            # جدول الإرسال عبر event loop الرئيسي (thread-safe)
-            asyncio.run_coroutine_threadsafe(self._send_audio(pcm_16k), self._loop)
-        except Exception as e:
-            pass  # تجاهل أي خطأ بالتحويل
+            # جمع الصوت في الـ buffer بدل إرساله فوراً
+            self._input_buffer.extend(pcm_16k)
+        except Exception:
+            pass
 
-    # ─── إرسال الصوت لـ Gemini ────────────────────────────────────────
+    # ─── إرسال الصوت لـ Gemini (دفعات كل ~200ms) ───────────────────
 
-    async def _send_audio(self, pcm_bytes):
-        """إرسال chunk صوتي لـ Gemini Live API."""
-        if not self.live_session or not self.running:
-            return
-        try:
-            await self.live_session.send_realtime_input(
-                audio={"data": pcm_bytes, "mime_type": "audio/pcm;rate=16000"}
-            )
-        except Exception as e:
-            print(f"[VoiceChat] Send error: {e}")
+    async def _send_batch_loop(self):
+        """تجميع صوت المستخدم وإرساله كل 200ms بدل كل 20ms."""
+        while self.running:
+            await asyncio.sleep(0.2)  # كل 200ms
+            if not self._input_buffer or not self.live_session:
+                continue
+            # اسحب الـ buffer وأرسله
+            batch = bytes(self._input_buffer)
+            self._input_buffer.clear()
+            try:
+                await self.live_session.send_realtime_input(
+                    audio={"data": batch, "mime_type": "audio/pcm;rate=16000"}
+                )
+            except Exception as e:
+                print(f"[VoiceChat] Send error: {e}")
 
     # ─── استقبال ردود Gemini ──────────────────────────────────────────
 
     async def _recv_loop(self):
-        """استقبال مستمر – يمرر كل قطعة صوت فوراً للـ buffer."""
+        """استقبال مستمر – كل chunk صوت يمررها فوراً للتشغيل."""
         try:
             while self.running:
                 try:
                     turn = self.live_session.receive()
-                    self._turn_done.clear()
-
                     async for response in turn:
                         if not self.running:
                             return
 
-                        # التحقق من المقاطعة
+                        # مقاطعة؟
                         sc = getattr(response, "server_content", None)
                         if sc and getattr(sc, "interrupted", False):
-                            async with self._buffer_lock:
-                                self._audio_buffer.clear()
                             if self.voice_client and self.voice_client.is_playing():
                                 self.voice_client.stop()
+                            while not self._output_queue.empty():
+                                try: self._output_queue.get_nowait()
+                                except: pass
                             continue
 
-                        # استخلاص الصوت فوراً
+                        # استخلاص الصوت (تجاهل text/thought parts)
                         chunk = None
-                        if response.data is not None:
-                            chunk = response.data
-                        elif sc and sc.model_turn:
+                        sc = sc or getattr(response, "server_content", None)
+                        if sc and sc.model_turn:
                             buf = bytearray()
                             for part in sc.model_turn.parts:
                                 idata = getattr(part, "inline_data", None)
@@ -262,62 +264,45 @@ class VoiceChatSession:
                                 chunk = bytes(buf)
 
                         if chunk:
-                            # تحويل فوري 24kHz mono → 48kHz stereo
+                            # تحويل فوري وإرسال للتشغيل
                             try:
                                 pcm_48k, _ = audioop.ratecv(chunk, 2, 1, 24000, 48000, None)
                                 stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
-                                async with self._buffer_lock:
-                                    self._audio_buffer.extend(stereo)
-                                self._new_audio.set()
+                                self._output_queue.put_nowait(stereo)
                             except Exception:
                                 pass
 
-                    # انتهى الـ turn
-                    self._turn_done.set()
                     self.messages_exchanged += 1
                     self.last_activity = time.time()
 
-                except Exception as inner_e:
+                except Exception as e:
                     if self.running:
-                        print(f"[VoiceChat] Recv turn error: {inner_e}")
-                    self._turn_done.set()
+                        print(f"[VoiceChat] Recv error: {e}")
                     await asyncio.sleep(0.5)
 
         except Exception as e:
             if self.running:
                 print(f"[VoiceChat] Recv loop error: {e}")
 
-    # ─── تشغيل الصوت بالديسكورد (streaming) ──────────────────────────────
+    # ─── تشغيل الصوت بالديسكورد ─────────────────────────────────────────
 
     async def _play_loop(self):
-        """تشغيل الصوت بشكل متواصل من الـ buffer."""
-        FRAME_SIZE = 3840  # 20ms عند 48kHz stereo 16-bit
-        MIN_BUFFER = FRAME_SIZE * 5  # ~100ms قبل ما نبدأ التشغيل
-
+        """تشغيل القطع فوراً واحدة ورا الثانية بدون فجوات."""
         while self.running:
             try:
-                # انتظر وصول صوت جديد
-                try:
-                    await asyncio.wait_for(self._new_audio.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                self._new_audio.clear()
-
-                # انتظر تجمع حد أدنى من البيانات (~100ms)
-                for _ in range(10):
-                    async with self._buffer_lock:
-                        if len(self._audio_buffer) >= MIN_BUFFER:
-                            break
-                    await asyncio.sleep(0.02)
-
-                # اسحب كل الصوت المتاح حالياً
-                async with self._buffer_lock:
-                    if not self._audio_buffer:
-                        continue
-                    pcm_data = bytes(self._audio_buffer)
-                    self._audio_buffer.clear()
-
+                # انتظر أول قطعة
+                data = await asyncio.wait_for(self._output_queue.get(), timeout=1.0)
                 self._is_playing = True
+
+                # اجمع أي قطع إضافية موجودة بالطابور (لتقليل عدد مرات play)
+                parts = [data]
+                while not self._output_queue.empty():
+                    try:
+                        parts.append(self._output_queue.get_nowait())
+                    except:
+                        break
+
+                pcm_data = b"".join(parts)
 
                 if self.voice_client and self.voice_client.is_connected():
                     src = discord.PCMAudio(io.BytesIO(pcm_data))
@@ -328,30 +313,11 @@ class VoiceChatSession:
                         src,
                         after=lambda e: self._loop.call_soon_threadsafe(finished.set),
                     )
-
-                    # أثناء التشغيل، تحقق إذا وصل صوت جديد
-                    while not finished.is_set():
-                        await asyncio.sleep(0.05)
-                        if finished.is_set():
-                            break
-                        # إذا وصل صوت جديد، شغله مباشرة بعد الحالي
-                        async with self._buffer_lock:
-                            if self._audio_buffer:
-                                extra = bytes(self._audio_buffer)
-                                self._audio_buffer.clear()
-                                # انتظر الحالي يخلص ثم شغل الجديد
-                                await finished.wait()
-                                src2 = discord.PCMAudio(io.BytesIO(extra))
-                                finished2 = asyncio.Event()
-                                self.voice_client.play(
-                                    src2,
-                                    after=lambda e: self._loop.call_soon_threadsafe(finished2.set),
-                                )
-                                await finished2.wait()
-                                break
+                    await asyncio.wait_for(finished.wait(), timeout=120)
 
                 self._is_playing = False
-
+            except asyncio.TimeoutError:
+                self._is_playing = False
             except Exception as e:
                 self._is_playing = False
                 if self.running:
