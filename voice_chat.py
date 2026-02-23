@@ -101,6 +101,18 @@ class VoiceChatSession:
             else:
                 self.voice_client = await self.voice_channel.connect()
 
+            self.running = True
+            self._connection_task = asyncio.create_task(self._gemini_connection_loop())
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.running = False
+            if self.voice_client and self.voice_client.is_connected():
+                await self.voice_client.disconnect(force=True)
+            await self.text_channel.send(f"❌ ما قدرت أدخل الفويس: {e}")
+
+    async def _gemini_connection_loop(self):
+        try:
             voice_name = getattr(self.bot, "current_voice", "Kore")
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
@@ -112,29 +124,37 @@ class VoiceChatSession:
                 ),
             )
 
-            self.live_session = await _client.aio.live.connect(model=NATIVE_AUDIO_MODEL, config=config)
-            self.running = True
-            self.last_activity = time.time()
+            async with _client.aio.live.connect(model=NATIVE_AUDIO_MODEL, config=config) as session:
+                self.live_session = session
+                self.last_activity = time.time()
 
-            if HAS_VOICE_RECV and hasattr(self.voice_client, "listen"):
-                self.voice_client.listen(voice_recv.BasicSink(self._on_voice))
+                if HAS_VOICE_RECV and hasattr(self.voice_client, "listen"):
+                    self.voice_client.listen(voice_recv.BasicSink(self._on_voice))
 
-            self._tasks = [
-                asyncio.create_task(self._recv_gemini()),
-                asyncio.create_task(self._play_loop()),
-                asyncio.create_task(self._silence_watch()),
-            ]
+                self._tasks = [
+                    asyncio.create_task(self._recv_gemini()),
+                    asyncio.create_task(self._play_loop()),
+                    asyncio.create_task(self._silence_watch()),
+                ]
 
-            await self.text_channel.send("🎤 دخلت الروم! تكلموا معي.. اكتبوا **بوت روح** عشان أطلع.")
-            self._log("active")
-            print(f"Voice chat started in '{self.voice_channel.name}' by {self.requester}")
+                try:
+                    await self.text_channel.send("🎤 دخلت الروم! تكلموا معي.. اكتبوا **بوت روح** عشان أطلع.")
+                except: pass
+                
+                self._log("active")
+                print(f"Voice chat started in '{self.voice_channel.name}' by {self.requester}")
+
+                while self.running:
+                    await asyncio.sleep(1)
 
         except Exception as e:
             import traceback; traceback.print_exc()
             self.running = False
             if self.voice_client and self.voice_client.is_connected():
                 await self.voice_client.disconnect(force=True)
-            await self.text_channel.send(f"❌ ما قدرت أدخل: {e}")
+            try:
+                await self.text_channel.send(f"❌ خطأ بالاتصال مع الذكاء الاصطناعي: {e}")
+            except: pass
 
     # ─── استقبال صوت الأعضاء ──────────────────────────────────────────
 
@@ -241,9 +261,8 @@ class VoiceChatSession:
         for t in self._tasks:
             t.cancel()
 
-        if self.live_session:
-            try: await self.live_session.close()
-            except: pass
+        if hasattr(self, "_connection_task"):
+            self._connection_task.cancel()
 
         if self.voice_client and self.voice_client.is_connected():
             try:
