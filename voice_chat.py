@@ -154,7 +154,9 @@ class VoiceChatSession:
         mode = getattr(self.bot, "voice_ai_mode", "helper")
         persona = getattr(self.bot, "current_persona", "troll")
 
-        if mode == "helper":
+        if getattr(self.bot, "current_persona_custom", None):
+            txt = f"أنت 'مستر ذبات'، {self.bot.current_persona_custom}"
+        elif mode == "helper":
             txt = "أنت مساعد صوتي ذكي ودود اسمه 'مستر ذبات'. تتكلم عربي سعودي عامي."
         elif mode == "dj":
             txt = "أنت DJ وشاعر اسمه 'مستر ذبات'. تغني وتنشد بأسلوب سعودي."
@@ -308,21 +310,30 @@ class VoiceChatSession:
         """Sync callback من thread الفويس."""
         if not self.running or user.bot:
             return
-        # ⭐ لا تسمع أحد لما البوت يتكلم (يمنع المقاطعة)
+        
+        # 🎙️ ميزة Barge-in (المقاطعة):
+        # تفعيل السماح بمقاطعة البوت وهو يتكلم.
         if self._streaming_source and self._streaming_source.has_data():
-            return
+            # تفريغ الصوت المتبقي لإيقاف كلام البوت فوراً
+            self._streaming_source.clear()
+            # مسح الطابور المتبقي
+            while not self.audio_queue_output.empty():
+                try: self.audio_queue_output.get_nowait()
+                except: pass
+
         if user.id in getattr(self.bot, "voice_ignored_users", set()):
             return
 
         now = time.time()
 
-        # قفل على متحدث واحد
-        if self._active_speaker_id is None:
+        # إذا قاطع شخص جديد፣ نقبل المقاطعة ونغير المتحدث
+        if self._active_speaker_id is not None and user.id != self._active_speaker_id:
+            # يمكن للعضو الجديد سرقة المايك والمقاطعة
             self._active_speaker_id = user.id
             self._active_speaker = user
-
-        if user.id != self._active_speaker_id:
-            return
+        elif self._active_speaker_id is None:
+            self._active_speaker_id = user.id
+            self._active_speaker = user
 
         self._speaker_silence = now
         self.participants.add(user.display_name)

@@ -59,10 +59,13 @@ class RoastBot(commands.Bot):
         self.roast_interval_max  = 240    # أقصى فترة (دقائق)
         self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
         self.current_persona     = "troll" # شخصية البوت (troll, boomer, tryhard, psycho)
+        self.current_persona_custom = None # إذا تم إنشاء شخصية بصرية عبر الداشبورد
         self.user_speak_history  = {}     # {user_id: {"unmuted_sec": 0, "last_unmute": 0}} لتتبع نسبة الكلام
+        self.server_memory       = {}     # {guild_id: [رسالة]} ذاكرة السيرفر للتعليق عليها
 
         # محادثة صوتية تفاعلية
         self.voice_join_allowed       = True   # هل يسمح للبوت بدخول الفويس
+        self.voice_proactive_audio    = False  # هل يدخل فجأة يسمع ويذب (الاستباقي)
         self.voice_auto_leave_sec     = 120    # مدة الخروج التلقائي بالثواني
         self.voice_ai_mode            = "helper"  # helper / roaster / dj
         self.voice_ignored_users      = set()  # أعضاء البوت ما يرد عليهم
@@ -79,6 +82,7 @@ class RoastBot(commands.Bot):
         # الذبات مقفلة by default – افتحها من الداشبورد
         # self.roast_loop.start()
         self.daily_report_loop.start()
+        self.proactive_audio_loop.start()
 
     async def on_ready(self):
         print(f"Logged in as {self.user.name} ({self.user.id})")
@@ -372,6 +376,8 @@ class RoastBot(commands.Bot):
             "psycho": "شخصية غامضة ومريضة نفسياً، تذبيحاتك هادية بس مرعبة ومستفزة، تتكلم كأنك جني جالس معاهم بالروم ويراقب تفاصيلهم بصمت."
         }
         active_persona = persona_prompts.get(self.current_persona, persona_prompts["troll"])
+        if getattr(self, "current_persona_custom", None):
+            active_persona = self.current_persona_custom
 
         # اختيار عشوائي للتركيز כדי ما تتكرر نفس نمط الذبة والأسلوب يكون متجدد
         focus_options = [
@@ -387,6 +393,12 @@ class RoastBot(commands.Bot):
         ]
         focus = random.choice(focus_options)
 
+        # ذاكرة السيرفر
+        recent_chat = self.server_memory.get(member.guild.id, [])
+        chat_context = ""
+        if recent_chat:
+            chat_context = "--- آخر السوالف في السيرفر (استخدمها لو تناسب الذبة) ---\n" + "\n".join(recent_chat[-10:]) + "\n----------------------------------------"
+
         prompt = (
             f"أنت تلعب الآن هذا الدور بدقة: [{active_persona}]\n"
             f"مهمتك: ذبة لاذعة جداً، لا تكرر أسلوبك القديم.\n"
@@ -399,7 +411,8 @@ class RoastBot(commands.Bot):
             f"حالة البث: {stream_info}\n"
             f"وضعه بالروم: {alone_info}\n"
             f"{other_members_info}\n"
-            f"----------------------------------------\n\n"
+            f"----------------------------------------\n"
+            f"{chat_context}\n"
             f"تعليمات إجبارية لهذه الذبة: [{focus}]\n"
             "مهم جداً: خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
         )
@@ -599,6 +612,55 @@ class RoastBot(commands.Bot):
     async def before_daily_report(self):
         await self.wait_until_ready()
 
+    # ─── Proactive Audio Loop (التسلل للفويس) ────────────────────────────────
+
+    @tasks.loop(minutes=10)
+    async def proactive_audio_loop(self):
+        if not getattr(self, "voice_proactive_audio", False) or not self.voice_join_allowed:
+            return
+        
+        # فرصة 30% كل 10 دقائق عشان ما يكون مزعج جداً
+        if random.random() > 0.3:
+            return
+
+        eligible_vcs = []
+        for guild in self.guilds:
+            if guild.id in self.voice_sessions:
+                continue
+            for vc in guild.voice_channels:
+                if vc.id == AFK_CHANNEL_ID: continue
+                members = [m for m in vc.members if not m.bot and not (m.voice.self_deaf or m.voice.deaf)]
+                if len(members) >= 2:
+                    eligible_vcs.append((guild, vc))
+
+        if not eligible_vcs:
+            return
+
+        guild, vc = random.choice(eligible_vcs)
+        try:
+            session = VoiceChatSession(
+                bot=self,
+                guild_id=guild.id,
+                voice_channel=vc,
+                text_channel=guild.system_channel or vc,
+                requester=guild.me,
+            )
+            # البوت يراقب بصمت مؤقتاً
+            self.voice_sessions[guild.id] = session
+            asyncio.create_task(session.start())
+            
+            # ممكن بعدين نرسل رسالة بالشات
+            ch = self.get_channel(MAIN_CHANNEL_ID) or guild.system_channel
+            if ch:
+                await ch.send("🥷 مستر ذبات دخل الفويس يتسمع عليكم...")
+                
+        except Exception as e:
+            print(f"Proactive Audio Error: {e}")
+
+    @proactive_audio_loop.before_loop
+    async def before_proactive_audio(self):
+        await self.wait_until_ready()
+
     # ─── Voice chat commands ────────────────────────────────────────────
 
     async def on_message(self, message):
@@ -606,6 +668,47 @@ class RoastBot(commands.Bot):
             return
 
         content = message.content.strip()
+
+        # تحديث ذاكرة السيرفر
+        if message.guild:
+            self.server_memory.setdefault(message.guild.id, [])
+            self.server_memory[message.guild.id].append(f"{message.author.display_name}: {content}")
+            self.server_memory[message.guild.id] = self.server_memory[message.guild.id][-50:]
+
+        # ذبات بصرية (Vision & Multimodal)
+        mentioned = self.user in message.mentions
+        starts_with_look = content.startswith("!شوف") or content.startswith("بوت شوف")
+        if message.attachments and (mentioned or starts_with_look):
+            for att in message.attachments:
+                if att.content_type and att.content_type.startswith("image/"):
+                    prompt = (
+                        "أنت 'مستر ذبات'، شخصيتك طقطوقي سعودي لاذع. "
+                        "قام المستخدم برفع هذه الصورة لك لتعلق عليها. "
+                        "حلل تفاصيل الصورة بدقة (مثل ترتيب السيت-أب، نتيجة اللعب، إلخ)، ووجه ذبة قوية ومضحكة جداً لصاحبها بناءً على ما تراه. "
+                        "تكلم بلهجة سعودية عامية وبدون مقدمات، سطرين بالكثير."
+                    )
+                    try:
+                        image_bytes = await att.read()
+                        part = types.Part.from_bytes(data=image_bytes, mime_type=att.content_type)
+                        async with message.channel.typing():
+                            response = await client.aio.models.generate_content(
+                                model=MODEL_NAME, contents=[prompt, part]
+                            )
+                            roast_text = response.text.strip()
+                            await message.reply(roast_text)
+                            
+                            self.roast_log.append((time.time(), message.author.display_name, roast_text))
+                            self.roast_log = self.roast_log[-100:]
+                            self.roast_count_per_user[message.author.id] = self.roast_count_per_user.get(message.author.id, 0) + 1
+                            self.last_roast_time = time.time()
+                            
+                            # شغّل الصوت بالفويس إذا كان موجود
+                            if message.author.voice and message.author.voice.channel:
+                                asyncio.create_task(self.play_tts_in_voice(message.author, roast_text))
+                    except Exception as e:
+                        print(f"Vision roast error: {e}")
+                        await message.reply("ما قدرت أشوف الصورة زين، شكلها مصورة بكاميرا ساهر!")
+                    return
 
         # بوت تعال – البوت يدخل الفويس ويبدأ محادثة صوتية
         if content in ("بوت تعال", "بوت تعالي", "يا بوت تعال"):

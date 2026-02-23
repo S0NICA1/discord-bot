@@ -10,6 +10,8 @@ import os
 import time
 import discord
 from aiohttp import web
+from google import genai
+from google.genai import types
 
 AFK_CHANNEL_ID = 782986605148635166
 
@@ -133,12 +135,23 @@ async def handle_stats(request):
         "current_voice": getattr(bot, "current_voice", "Kore"),
         "current_persona": getattr(bot, "current_persona", "troll"),
         "voice_join_allowed": getattr(bot, "voice_join_allowed", True),
+        "voice_proactive_audio": getattr(bot, "voice_proactive_audio", False),
         "voice_auto_leave_sec": getattr(bot, "voice_auto_leave_sec", 120),
         "voice_ai_mode": getattr(bot, "voice_ai_mode", "helper"),
         "voice_sessions_active": len(getattr(bot, "voice_sessions", {})),
         "voice_session_log": getattr(bot, "voice_session_log", [])[-20:],
         "voice_ignored": [{"id":uid,"name":str(uid)} for uid in getattr(bot, "voice_ignored_users", set())],
     }
+    
+    # تحذيرات الإدمن (AI Alerts)
+    alerts = []
+    for m in members_in_vc:
+        if m["minutes"] > 60 and (m.get("deafened", False) or m.get("muted", False)):
+            alerts.append(f"🎯 فرصة ذبة: {m['name']} مسوي دفن/ميوت من أكثر من ساعة!")
+        if m.get("streaming", False) and len(members_in_vc) == 1:
+            alerts.append(f"📺 فرصة ذبة: {m['name']} يبث لحاله بالروم!")
+    data["alerts"] = alerts
+    
     # تحسين الأسماء المتجاهلة
     for g in bot.guilds:
         for v in data["voice_ignored"]:
@@ -249,6 +262,8 @@ async def handle_voice_settings(request):
         body = await request.json()
         if "join_allowed" in body:
             bot.voice_join_allowed = bool(body["join_allowed"])
+        if "proactive_audio" in body:
+            bot.voice_proactive_audio = bool(body["proactive_audio"])
         if "auto_leave_sec" in body:
             bot.voice_auto_leave_sec = max(30, min(int(body["auto_leave_sec"]), 600))
         if "ai_mode" in body:
@@ -292,6 +307,136 @@ async def handle_voice_debug(request):
     if not debug_data:
         debug_data["status"] = "no_active_session"
     return web.Response(text=json.dumps(debug_data, ensure_ascii=False, default=str), content_type="application/json")
+
+
+async def handle_ai_report(request):
+    bot = request.app["bot"]
+    try:
+        from google import genai
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        stats = f"Online users in VC: {sum(len(vc.members) for g in bot.guilds for vc in g.voice_channels)}\n"
+        stats += f"Total roasts: {sum(bot.roast_count_per_user.values())}\n"
+        shame = sorted(bot.roast_count_per_user.items(), key=lambda x:-x[1])[:3]
+        stats += f"Shame board top 3 max roasts: {shame}\n"
+        stats += f"Protected users: {len(bot.protected_users)}"
+        
+        prompt = (
+            "أنت مستر ذبات. حلل إحصائيات الديسكورد التالية واكتب تقرير مسائي ساخر.\n"
+            f"الإحصائيات: {stats}\n"
+            "الناتج يجب أن يكون JSON فقط بالصيغة التالية بالضبط بدون أي نصوص أخرى:\n"
+            "{\"title\": \"عنوان التقرير\", \"toxic_user\": \"أكثر عضو انجلد\", \"quiet_user\": \"أصنم عضو (اختر عشوائيا اذا لم يوجد)\", \"summary\": \"ملخص ساخر للوضع سطرين\", \"advice\": \"نصيحة للإدمن\"}"
+        )
+        response = await client.aio.models.generate_content(
+            model="gemini-3-flash-preview",
+            contents=prompt,
+        )
+        text = response.text.replace('```json', '').replace('```', '').strip()
+        data = json.loads(text)
+        return web.Response(text=json.dumps({"ok":True, "report": data}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
+
+
+async def handle_build_persona(request):
+    bot = request.app["bot"]
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        if field and field.name == 'image':
+            image_bytes = await field.read()
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+            part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            prompt = (
+                "ابتكر شخصية مضحكة جداً أو قاسية لبوت ديسكورد بناءً على هذا الشكل/الصورة ليكون 'مستر ذبات' الجديد.\n"
+                "أعطني JSON يحتوي على:\n"
+                "1. name: اسم الشخصية القصير\n"
+                "2. prompt: الـ System Prompt التفصيلي للشخصية وطريقة كلامها باللهجة السعودية (سطرين)\n"
+                "3. voice: اختر الصوت الأنسب من (Kore, Aoede, Puck, Fenrir, Charon)\n"
+                "الرد يجب أن يكون بصيغة JSON فقط بدون نصوص إضافية."
+            )
+            response = await client.aio.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=[prompt, part],
+            )
+            text = response.text.replace('```json', '').replace('```', '').strip()
+            data = json.loads(text)
+            
+            bot.current_persona_custom = data.get("prompt", "شخصية جديدة")
+            bot.current_voice = data.get("voice", "Kore")
+            
+            return web.Response(text=json.dumps({"ok":True, "persona": data}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok":False, "error":"No image"}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
+
+
+async def handle_start_minigame(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        game = body.get("type", "trivia")
+        prompts = {
+            "trivia": "اكتب سؤال تحدي معلومات صعب جدا عن الألعاب (Gaming) مع 4 خيارات، وخل كلامك بلهجة سعودية وتحدى الموجودين يجاوبون.",
+            "roast_battle": "أعلن في الشات عن بدء 'حلبة الذبات'. اطلب من الموجودين يكتبون ذباتهم واللي ذبته أقوى بيفوز، واستفزهم بلهجة سعودية.",
+            "math": "عطهم مسألة رياضيات معقدة شوي وقول أول واحد يحلها له جائزة، بلهجة سعودية مستفزة."
+        }
+        prompt = prompts.get(game, prompts["trivia"])
+        from google import genai
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        response = await client.aio.models.generate_content(
+            model="gemini-3-flash-preview", contents=prompt
+        )
+        # Fetch MAIN_CHANNEL_ID
+        ch = bot.get_channel(bot.get_channel(782986605148635166).guild.text_channels[0].id) # fallback
+        for guild in bot.guilds:
+            system = guild.system_channel or guild.text_channels[0]
+            if system:
+                ch = system
+                break
+        
+        # Override if main channel is known
+        import os
+        mc_id = int(os.getenv("MAIN_CHANNEL_ID", 0))
+        if mc_id: ch = bot.get_channel(mc_id)
+        
+        if ch:
+            await ch.send(f"🎮 **لعبة جديدة** 🎮\n{response.text.strip()}")
+            return web.Response(text='{"ok":true}', content_type="application/json")
+        return web.Response(text='{"ok":false, "error":"No channel"}', content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
+
+
+async def handle_soundboard(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        effect = body.get("effect")
+        prompts = {
+            "laugh": "hahahaha HAHAHAHA! hahahaha!",
+            "scream": "Aaaaaaaaaahhhhhh!",
+            "bruh": "Bruh.",
+            "sigh": "Ugh. Sigh."
+        }
+        text = prompts.get(effect, "Hello")
+        
+        target_member = None
+        for g in bot.guilds:
+            for vc in g.voice_channels:
+                if len([m for m in vc.members if not m.bot]) > 0:
+                    target_member = [m for m in vc.members if not m.bot][0]
+                    break
+            if target_member: break
+            
+        if target_member:
+            import asyncio
+            asyncio.create_task(bot.play_tts_in_voice(target_member, text))
+            return web.Response(text='{"ok":true}', content_type="application/json")
+        return web.Response(text='{"ok":false, "error":"لا يوجد أحد في الفويس"}', content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
 
 # ─── HTML ────────────────────────────────────────────────────────────────
 
@@ -541,6 +686,15 @@ input[type=range]{width:100%;accent-color:var(--accent)}
               <button class="btn btn-green btn-sm" onclick="changePersona()">🎭 تغيير</button>
             </div>
             
+            <div style="margin-bottom:1rem; padding:1rem; background:var(--bg2); border-radius:10px; border:1px dashed var(--purple)">
+              <label style="color:var(--purple);font-weight:bold;margin-bottom:.5rem;">🖼️ صانع الشخصيات الذكي (ارفع صورة)</label>
+              <div style="display:flex;gap:.5rem; align-items:center">
+                <input type="file" id="persona-image" accept="image/*" style="flex:1; font-size:.75rem">
+                <button class="btn btn-purple btn-sm" onclick="buildPersona()" id="btn-build-persona" style="background:var(--purple);color:#fff;border-color:var(--purple)">✨ ابتكار شخصية</button>
+              </div>
+              <p id="persona-build-msg" style="font-size:.7rem; color:var(--muted); margin-top:.5rem"></p>
+            </div>
+            
             <label>🎙️ صوت البوت (يتغير بالروم)</label>
             <div style="display:flex;gap:.5rem">
               <select id="voice-select" style="flex:1">
@@ -554,6 +708,19 @@ input[type=range]{width:100%;accent-color:var(--accent)}
             </div>
             <p id="voice-msg" style="font-size:.75rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
           </div>
+          <!-- Minigames Section -->
+          <div class="form-group" style="margin-top:1rem; border-top:1px dashed var(--border); padding-top:1rem;">
+            <label>👾 توليد لعبة مصغرة في الشات (AI Minigames)</label>
+            <div style="display:flex;gap:.5rem; align-items:center">
+              <select id="minigame-type" style="flex:1">
+                <option value="trivia">لعبة تحدي معلومات (Trivia)</option>
+                <option value="roast_battle">تحدي الذبات (Roast Battle)</option>
+                <option value="math">لعبة سرعة حساب (مسألة رياضية)</option>
+              </select>
+              <button class="btn btn-blue btn-sm" onclick="startMinigame()" id="btn-minigame">🚀 أطلق اللعبة</button>
+            </div>
+          </div>
+          
           <p id="status-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem"></p>
         </div>
       </div>
@@ -641,6 +808,20 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         <div class="card-head"><h2>🎮 أكثر الألعاب شعبية</h2></div>
         <div class="card-body" id="games-list"><div class="empty">لا توجد بيانات</div></div>
       </div>
+      
+      <div class="card full">
+        <div class="card-head"><h2>🧠 تقرير السيرفر الذكي (AI Report)</h2></div>
+        <div class="card-body">
+          <button class="btn btn-purple" onclick="generateAIReport()" id="btn-ai-report" style="background:var(--purple);color:#fff;border-color:var(--purple)">✨ توليد تقرير ذكي عن حالة السيرفر</button>
+          <div id="ai-report-output" style="margin-top:1rem; display:none; background:var(--bg2); padding:1rem; border-radius:10px; border-right:3px solid var(--purple)">
+            <h3 id="ai-title" style="color:var(--purple); margin-bottom:.5rem; font-size:1.1rem">عنوان</h3>
+            <p style="font-size:.85rem; margin-bottom:.3rem"><strong>أكثر عضو انجلد:</strong> <span id="ai-toxic"></span></p>
+            <p style="font-size:.85rem; margin-bottom:.3rem"><strong>أصنم عضو:</strong> <span id="ai-quiet"></span></p>
+            <p style="margin-top:.6rem; font-size:.85rem"><strong>الملخص:</strong> <span id="ai-summary"></span></p>
+            <p style="margin-top:.6rem; color:var(--yellow); font-size:.85rem"><strong>نصيحة الإدمن:</strong> <span id="ai-advice"></span></p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -681,6 +862,13 @@ input[type=range]{width:100%;accent-color:var(--accent)}
             </div>
           </div>
           <div class="form-group" style="margin-top:1rem">
+            <label>🥷 الدخول الصوتي الاستباقي (Sneak In)</label>
+            <div style="display:flex;gap:.5rem;align-items:center">
+              <button class="btn btn-sm" id="proactive-toggle-btn" onclick="toggleProactiveAudio()">شغال</button>
+              <span style="font-size: .7rem; color: var(--muted)">يدخل فجأة يسمع السوالف ويذب ثم يطلع</span>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:1rem">
             <label>⏱️ الخروج التلقائي بعد سكوت: <strong id="lbl-leave">120</strong> ثانية</label>
             <input type="range" id="slider-leave" min="30" max="600" value="120" oninput="document.getElementById('lbl-leave').textContent=this.value">
           </div>
@@ -696,6 +884,17 @@ input[type=range]{width:100%;accent-color:var(--accent)}
           <p id="voice-settings-msg" style="font-size:.8rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
           <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
             <p style="font-size:.8rem;color:var(--muted)">💡 الأعضاء يكتبون <strong>بوت تعال</strong> بالشات عشان البوت يدخل الروم ويتكلم معاهم، و <strong>بوت روح</strong> عشان يطلع.</p>
+          </div>
+          
+          <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
+            <h3 style="font-size:.9rem; color:var(--purple); margin-bottom:.5rem">🎹 الساوند-بورد الذكي (AI Soundboard)</h3>
+            <p style="font-size:.7rem; color:var(--muted); margin-bottom:.8rem">شغّل أصوات ذكية داخل الفويس الحالي بضغطة زر:</p>
+            <div style="display:flex;gap:.5rem; flex-wrap:wrap">
+              <button class="btn btn-purple btn-sm" onclick="playEffect('laugh')">😈 ضحكة شريرة</button>
+              <button class="btn btn-purple btn-sm" onclick="playEffect('scream')">😱 صرخة</button>
+              <button class="btn btn-purple btn-sm" onclick="playEffect('sigh')">😮‍💨 تنهيدة</button>
+              <button class="btn btn-purple btn-sm" onclick="playEffect('bruh')">😑 Bruh</button>
+            </div>
           </div>
         </div>
       </div>
@@ -827,6 +1026,16 @@ async function loadData(){
     document.getElementById('vc-count').textContent=D.members_in_vc.length;
     document.getElementById('roast-total').textContent=D.recent_roasts.length;
 
+    // AI Alerts
+    const alertsBox = document.getElementById('ai-alerts-box');
+    if(alertsBox) {
+      if(D.alerts && D.alerts.length > 0) {
+        alertsBox.innerHTML = D.alerts.map(a => `<div style="padding:.5rem; background:rgba(244,63,94,.1); border-left:3px solid var(--accent); margin-bottom:.5rem; font-size:.8rem; border-radius:4px">${a}</div>`).join('');
+      } else {
+        alertsBox.innerHTML = '<div class="empty" style="padding:.5rem; font-size:.75rem">لا توجد تنبيهات حالياً</div>';
+      }
+    }
+
     // Interval sliders
     document.getElementById('slider-min').value=D.interval_min;document.getElementById('lbl-min').textContent=D.interval_min;
     document.getElementById('slider-max').value=D.interval_max;document.getElementById('lbl-max').textContent=D.interval_max;
@@ -838,6 +1047,10 @@ async function loadData(){
     if(D.voice_join_allowed !== undefined){
       document.getElementById('voice-toggle-btn').innerHTML = D.voice_join_allowed ? '🔓 مسموح' : '🔒 ممنوع';
       document.getElementById('voice-toggle-btn').className = D.voice_join_allowed ? 'btn btn-green btn-sm' : 'btn btn-red btn-sm';
+    }
+    if(D.voice_proactive_audio !== undefined){
+      document.getElementById('proactive-toggle-btn').innerHTML = D.voice_proactive_audio ? '🥷 شغال (مفعل)' : '🛑 معطل';
+      document.getElementById('proactive-toggle-btn').className = D.voice_proactive_audio ? 'btn btn-green btn-sm' : 'btn btn-red btn-sm';
     }
     if(D.voice_auto_leave_sec) { document.getElementById('slider-leave').value = D.voice_auto_leave_sec; document.getElementById('lbl-leave').textContent = D.voice_auto_leave_sec; }
     if(D.voice_ai_mode) document.getElementById('voice-mode-select').value = D.voice_ai_mode;
@@ -949,6 +1162,71 @@ function renderCharts(){
 async function forceRoast(){await fetch('/api/force_roast',{method:'POST'});toast('أمر الذبة انطلق!','ok');setTimeout(loadData,3000)}
 async function toggleLoop(){const r=await fetch('/api/toggle',{method:'POST'});const d=await r.json();toast(d.running?'الذبات شغّالة ▶️':'الذبات متوقفة ⏸️','ok');setTimeout(loadData,1000)}
 
+async function generateAIReport(){
+  const btn = document.getElementById('btn-ai-report');
+  btn.textContent = '⏳ جاري التحليل...'; btn.disabled = true;
+  try {
+    const r = await fetch('/api/ai_report', {method:'POST'});
+    const d = await r.json();
+    if(d.ok && d.report){
+      document.getElementById('ai-report-output').style.display='block';
+      document.getElementById('ai-title').textContent=d.report.title;
+      document.getElementById('ai-toxic').textContent=d.report.toxic_user;
+      document.getElementById('ai-quiet').textContent=d.report.quiet_user;
+      document.getElementById('ai-summary').textContent=d.report.summary;
+      document.getElementById('ai-advice').textContent=d.report.advice;
+      toast('تم استخراج التقرير الذكي ✨','ok');
+    } else {
+      toast('فشل التقرير، تأكد من البيانات','error');
+    }
+  }catch(e){toast('خطأ!','error');}
+  if(btn){ btn.textContent = '✨ توليد تقرير ذكي عن حالة السيرفر'; btn.disabled = false; }
+}
+
+async function buildPersona(){
+  const fileInput = document.getElementById('persona-image');
+  if(!fileInput || !fileInput.files[0]){ toast('اختر صورة أولاً','error'); return; }
+  const btn = document.getElementById('btn-build-persona');
+  btn.textContent = '⏳ جاري الابتكار...'; btn.disabled = true;
+  const formData = new FormData();
+  formData.append('image', fileInput.files[0]);
+  try {
+    const r = await fetch('/api/build_persona', {method:'POST', body:formData});
+    const d = await r.json();
+    if(d.ok){
+      document.getElementById('persona-build-msg').innerHTML = `<span style="color:var(--green)">تم تحويل البوت إلى: <strong>${d.persona.name||'شخصية مجهولة'}</strong> بصوت ${d.persona.voice||'Kore'}</span>`;
+      toast('تم ابتكار الشخصية وتطبيقها بنجاح! 🎭','ok');
+      loadData();
+    } else {
+      toast('فشل الابتكار','error');
+    }
+  }catch(e){toast('خطأ!','error');}
+  if(btn){ btn.textContent = '✨ ابتكار شخصية'; btn.disabled = false; }
+}
+
+
+async function startMinigame(){
+  const typ = document.getElementById('minigame-type').value;
+  const btn = document.getElementById('btn-minigame');
+  btn.textContent = '⏳ جاري الإطلاق...'; btn.disabled = true;
+  try {
+    const r = await fetch('/api/start_minigame', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:typ})});
+    const d = await r.json();
+    if(d.ok){ toast('تم إرسال اللعبة للشات! 🎮','ok'); }
+    else { toast('خطأ: ' + (d.error||'فشل'),'error'); }
+  }catch(e){toast('خطأ!','error');}
+  btn.textContent = '🚀 أطلق اللعبة'; btn.disabled = false;
+}
+
+async function playEffect(eff){
+  try {
+    const r = await fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({effect:eff})});
+    const d = await r.json();
+    if(d.ok){ toast('جاري تشغيل الصوت... 🔊','ok'); }
+    else { toast('خطأ: ' + (d.error||'لا يوجد أحد بالفويس'),'error'); }
+  }catch(e){toast('خطأ!','error');}
+}
+
 async function sendCustom(){
   const mid=document.getElementById('roast-target').value,txt=document.getElementById('roast-text').value.trim();
   if(!mid||!txt){showMsg('custom-msg','⚠️ اختر عضو واكتب');return}
@@ -1015,6 +1293,12 @@ async function toggleVoiceJoin(){
   const newVal = !d.voice_join_allowed;
   await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({join_allowed:newVal})});
   toast(newVal?'البوت يقدر يدخل الفويس 🔓':'البوت ممنوع من الفويس 🔒','ok');setTimeout(loadData,500);
+}
+async function toggleProactiveAudio(){
+  const r=await fetch('/api/stats');const d=await r.json();
+  const newVal = !d.voice_proactive_audio;
+  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proactive_audio:newVal})});
+  toast(newVal?'الدخول الاستباقي مفعل 🥷':'الدخول الاستباقي معطل 🛑','ok');setTimeout(loadData,500);
 }
 async function kickVoice(){
   await fetch('/api/voice_kick',{method:'POST'});toast('تم طرد البوت من الفويس 🚪','ok');setTimeout(loadData,1000);
@@ -1103,6 +1387,10 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/voice_kick",     handle_voice_kick)
     app.router.add_post("/api/protect",       handle_protect)
     app.router.add_get("/api/voice_debug",    handle_voice_debug)
+    app.router.add_post("/api/ai_report",     handle_ai_report)
+    app.router.add_post("/api/build_persona", handle_build_persona)
+    app.router.add_post("/api/start_minigame",handle_start_minigame)
+    app.router.add_post("/api/soundboard",    handle_soundboard)
     return app
 
 
