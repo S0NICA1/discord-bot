@@ -131,8 +131,19 @@ async def handle_stats(request):
         "interval_min": bot.roast_interval_min,
         "interval_max": bot.roast_interval_max,
         "current_voice": getattr(bot, "current_voice", "Kore"),
-        "current_persona": getattr(bot, "current_persona", "troll")
+        "current_persona": getattr(bot, "current_persona", "troll"),
+        "voice_join_allowed": getattr(bot, "voice_join_allowed", True),
+        "voice_auto_leave_sec": getattr(bot, "voice_auto_leave_sec", 120),
+        "voice_ai_mode": getattr(bot, "voice_ai_mode", "helper"),
+        "voice_sessions_active": len(getattr(bot, "voice_sessions", {})),
+        "voice_session_log": getattr(bot, "voice_session_log", [])[-20:],
+        "voice_ignored": [{"id":uid,"name":str(uid)} for uid in getattr(bot, "voice_ignored_users", set())],
     }
+    # تحسين الأسماء المتجاهلة
+    for g in bot.guilds:
+        for v in data["voice_ignored"]:
+            m = g.get_member(v["id"])
+            if m: v["name"] = m.display_name; v["avatar"] = str(m.display_avatar.url)
     return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
 
 
@@ -228,6 +239,45 @@ async def handle_change_persona(request):
         persona = body.get("persona", "troll")
         bot.current_persona = persona
         return web.Response(text=json.dumps({"ok":True,"persona":persona}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+
+
+async def handle_voice_settings(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        if "join_allowed" in body:
+            bot.voice_join_allowed = bool(body["join_allowed"])
+        if "auto_leave_sec" in body:
+            bot.voice_auto_leave_sec = max(30, min(int(body["auto_leave_sec"]), 600))
+        if "ai_mode" in body:
+            bot.voice_ai_mode = body["ai_mode"]
+        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+
+
+async def handle_voice_ignore(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        mid = int(body.get("member_id", 0)); action = body.get("action", "add")
+        if action == "add":
+            bot.voice_ignored_users.add(mid)
+        else:
+            bot.voice_ignored_users.discard(mid)
+        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+
+
+async def handle_voice_kick(request):
+    bot = request.app["bot"]
+    try:
+        for gid, session in list(bot.voice_sessions.items()):
+            await session.stop(reason="طرد من الداشبورد")
+        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
     except Exception as e:
         return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
@@ -420,6 +470,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <div class="tabs">
     <div class="tab active" onclick="showPage('overview')">📊 نظرة عامة</div>
     <div class="tab" onclick="showPage('control')">🕹️ التحكم</div>
+    <div class="tab" onclick="showPage('voice')">🎤 المحادثة الصوتية</div>
     <div class="tab" onclick="showPage('roasts')">🔥 الذبات</div>
     <div class="tab" onclick="showPage('analytics')">📈 التحليلات</div>
     <div class="tab" onclick="showPage('members')">👥 الأعضاء</div>
@@ -602,6 +653,57 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       </div>
     </div>
   </div>
+
+  <!-- ═══ PAGE: VOICE CHAT ═══ -->
+  <div class="page" id="page-voice">
+    <div class="grid">
+      <div class="card">
+        <div class="card-head"><h2>🎤 إعدادات المحادثة الصوتية</h2></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>🔒 السماح للبوت بدخول الفويس</label>
+            <div style="display:flex;gap:.5rem;align-items:center">
+              <button class="btn btn-sm" id="voice-toggle-btn" onclick="toggleVoiceJoin()">🔓 مسموح</button>
+              <button class="btn btn-red btn-sm" onclick="kickVoice()">🚪 أطلع البوت الحين</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:1rem">
+            <label>⏱️ الخروج التلقائي بعد سكوت: <strong id="lbl-leave">120</strong> ثانية</label>
+            <input type="range" id="slider-leave" min="30" max="600" value="120" oninput="document.getElementById('lbl-leave').textContent=this.value">
+          </div>
+          <div class="form-group">
+            <label>🎛️ وضع الـ AI بالمحادثة الصوتية</label>
+            <select id="voice-mode-select">
+              <option value="helper">🤖 مساعد ذكي ودود</option>
+              <option value="roaster">🔥 مستر ذبات (يذب بشخصيته الحالية)</option>
+              <option value="dj">🎵 DJ – يغني ويقول شعر</option>
+            </select>
+          </div>
+          <button class="btn btn-blue" onclick="saveVoiceSettings()">💾 حفظ الإعدادات</button>
+          <p id="voice-settings-msg" style="font-size:.8rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
+          <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
+            <p style="font-size:.8rem;color:var(--muted)">💡 الأعضاء يكتبون <strong>بوت تعال</strong> بالشات عشان البوت يدخل الروم ويتكلم معاهم، و <strong>بوت روح</strong> عشان يطلع.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>🔇 تجاهل أعضاء (ما يرد عليهم بالصوت)</h2></div>
+        <div class="card-body">
+          <div class="form-group">
+            <div style="display:flex;gap:.5rem">
+              <select id="voice-ignore-select" style="flex:1"><option value="">اختر</option></select>
+              <button class="btn btn-red btn-sm" onclick="addVoiceIgnore()">🔇 تجاهل</button>
+            </div>
+          </div>
+          <div id="voice-ignored-list"></div>
+        </div>
+      </div>
+      <div class="card full">
+        <div class="card-head"><h2>📊 سجل المحادثات الصوتية</h2><span class="badge badge-purple" id="voice-log-count">0</span></div>
+        <div class="card-body" id="voice-log-list" style="max-height:350px"><div class="empty">لا توجد محادثات بعد</div></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -657,6 +759,34 @@ async function loadData(){
     // Settings
     if(D.current_voice) document.getElementById('voice-select').value = D.current_voice;
     if(D.current_persona) document.getElementById('persona-select').value = D.current_persona;
+
+    // Voice chat settings
+    if(D.voice_join_allowed !== undefined){
+      document.getElementById('voice-toggle-btn').innerHTML = D.voice_join_allowed ? '🔓 مسموح' : '🔒 ممنوع';
+      document.getElementById('voice-toggle-btn').className = D.voice_join_allowed ? 'btn btn-green btn-sm' : 'btn btn-red btn-sm';
+    }
+    if(D.voice_auto_leave_sec) { document.getElementById('slider-leave').value = D.voice_auto_leave_sec; document.getElementById('lbl-leave').textContent = D.voice_auto_leave_sec; }
+    if(D.voice_ai_mode) document.getElementById('voice-mode-select').value = D.voice_ai_mode;
+
+    // Voice ignore dropdown
+    const viOpts='<option value="">اختر</option>'+D.all_members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
+    document.getElementById('voice-ignore-select').innerHTML = viOpts;
+
+    // Voice ignored list
+    const vil = document.getElementById('voice-ignored-list');
+    if(!D.voice_ignored?.length){vil.innerHTML='<div class="empty" style="padding:.5rem">لا أحد متجاهل</div>'}
+    else{vil.innerHTML=D.voice_ignored.map(p=>`<div style="display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:.82rem;font-weight:700">${p.name}</span><button class="btn btn-sm" onclick="removeVoiceIgnore(${p.id})" style="color:var(--accent)">❌</button></div>`).join('')}
+
+    // Voice session log
+    document.getElementById('voice-log-count').textContent = D.voice_session_log?.length || 0;
+    const vll = document.getElementById('voice-log-list');
+    if(!D.voice_session_log?.length){vll.innerHTML='<div class="empty">لا توجد محادثات بعد</div>'}
+    else{vll.innerHTML=[...D.voice_session_log].reverse().map(s=>{
+      const st = new Date(s.start*1000).toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'});
+      const dur = s.end ? Math.round((s.end-s.start)/60) : '...';
+      const badge = s.status==='active'?'<span class="badge badge-green pulse">● نشط</span>':'<span class="badge badge-red">● منتهي</span>';
+      return `<div style="padding:.5rem 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:.5rem">${badge}<strong style="font-size:.82rem">${s.requester}</strong><span style="color:var(--muted);font-size:.72rem">${st} | ${s.channel} | ${dur} د | ${s.messages||0} رد</span></div>${s.reason?`<span style="font-size:.7rem;color:var(--dim)">📌 ${s.reason}</span>`:''}</div>`;
+    }).join('')}
 
     // Members in VC
     const ml=document.getElementById('members-list');
@@ -806,6 +936,31 @@ async function removeProtect(mid){
 
 function showMsg(id,msg){const e=document.getElementById(id);e.textContent=msg;setTimeout(()=>e.textContent='',4000)}
 
+async function toggleVoiceJoin(){
+  const r=await fetch('/api/stats');const d=await r.json();
+  const newVal = !d.voice_join_allowed;
+  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({join_allowed:newVal})});
+  toast(newVal?'البوت يقدر يدخل الفويس 🔓':'البوت ممنوع من الفويس 🔒','ok');setTimeout(loadData,500);
+}
+async function kickVoice(){
+  await fetch('/api/voice_kick',{method:'POST'});toast('تم طرد البوت من الفويس 🚪','ok');setTimeout(loadData,1000);
+}
+async function saveVoiceSettings(){
+  const leave=+document.getElementById('slider-leave').value;
+  const mode=document.getElementById('voice-mode-select').value;
+  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_leave_sec:leave,ai_mode:mode})});
+  toast('تم حفظ إعدادات المحادثة الصوتية ✅','ok');showMsg('voice-settings-msg','✅ تم الحفظ');
+}
+async function addVoiceIgnore(){
+  const mid=document.getElementById('voice-ignore-select').value;if(!mid)return;
+  await fetch('/api/voice_ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:+mid,action:'add'})});
+  toast('تم تجاهل العضو 🔇','ok');setTimeout(loadData,500);
+}
+async function removeVoiceIgnore(mid){
+  await fetch('/api/voice_ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid,action:'remove'})});
+  toast('تمت إزالة التجاهل','ok');setTimeout(loadData,500);
+}
+
 loadData();setInterval(loadData,20000);
 </script>
 </body>
@@ -829,6 +984,9 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/change_interval",handle_change_interval)
     app.router.add_post("/api/change_voice",  handle_change_voice)
     app.router.add_post("/api/change_persona",handle_change_persona)
+    app.router.add_post("/api/voice_settings", handle_voice_settings)
+    app.router.add_post("/api/voice_ignore",   handle_voice_ignore)
+    app.router.add_post("/api/voice_kick",     handle_voice_kick)
     app.router.add_post("/api/protect",       handle_protect)
     return app
 

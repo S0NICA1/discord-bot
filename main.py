@@ -14,6 +14,7 @@ from google.genai import types
 from dotenv import load_dotenv
 from dashboard_ui import DashboardView
 from web_dashboard import start_web_server
+from voice_chat import VoiceChatSession, HAS_VOICE_RECV
 
 # Load environment variables
 load_dotenv()
@@ -59,6 +60,16 @@ class RoastBot(commands.Bot):
         self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
         self.current_persona     = "troll" # شخصية البوت (troll, boomer, tryhard, psycho)
         self.user_speak_history  = {}     # {user_id: {"unmuted_sec": 0, "last_unmute": 0}} لتتبع نسبة الكلام
+
+        # محادثة صوتية تفاعلية
+        self.voice_join_allowed       = True   # هل يسمح للبوت بدخول الفويس
+        self.voice_auto_leave_sec     = 120    # مدة الخروج التلقائي بالثواني
+        self.voice_ai_mode            = "helper"  # helper / roaster / dj
+        self.voice_ignored_users      = set()  # أعضاء البوت ما يرد عليهم
+        self.voice_sessions           = {}     # {guild_id: VoiceChatSession}
+        self.voice_session_log        = []     # سجل المحادثات الصوتية
+        self.voice_conversation_memory = {}    # {user_id: [مواضيع]} ذاكرة المحادثات
+
         self._start_time         = time.time()
 
     # ─── Setup ────────────────────────────────────────────────────────────────
@@ -586,6 +597,52 @@ class RoastBot(commands.Bot):
     @daily_report_loop.before_loop
     async def before_daily_report(self):
         await self.wait_until_ready()
+
+    # ─── Voice chat commands ────────────────────────────────────────────
+
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        content = message.content.strip()
+
+        # بوت تعال – البوت يدخل الفويس ويبدأ محادثة صوتية
+        if content in ("بوت تعال", "بوت تعالي", "يا بوت تعال"):
+            if not self.voice_join_allowed:
+                await message.channel.send("🔒 المحادثة الصوتية معطلة حالياً.")
+                return
+            if not HAS_VOICE_RECV:
+                await message.channel.send("❌ مكتبة استقبال الصوت غير مثبتة.")
+                return
+            if not message.author.voice or not message.author.voice.channel:
+                await message.channel.send("🔈 ادخل روم فويس أول!")
+                return
+            if message.author.voice.channel.id == AFK_CHANNEL_ID:
+                await message.channel.send("❌ ما أقدر أدخل روم AFK.")
+                return
+            if message.guild.id in self.voice_sessions:
+                await message.channel.send("🎙️ أنا أصلاً بالروم!")
+                return
+
+            session = VoiceChatSession(
+                bot=self,
+                guild_id=message.guild.id,
+                voice_channel=message.author.voice.channel,
+                text_channel=message.channel,
+                requester=message.author,
+            )
+            self.voice_sessions[message.guild.id] = session
+            asyncio.create_task(session.start())
+            return
+
+        # بوت روح – البوت يطلع من الفويس
+        if content in ("بوت روح", "بوت اطلع", "يا بوت روح"):
+            session = self.voice_sessions.get(message.guild.id)
+            if session:
+                await session.stop(reason="طلب من " + message.author.display_name)
+            return
+
+        await self.process_commands(message)
 
 
 # ─── Bot instance ─────────────────────────────────────────────────────────────
