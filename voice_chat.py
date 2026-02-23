@@ -22,7 +22,13 @@ except ImportError:
     print("⚠️ discord-ext-voice-recv not installed – voice chat disabled")
 
 NATIVE_AUDIO_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
-_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+_client = None
+
+def get_gemini_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _client
 
 
 class VoiceChatSession:
@@ -125,7 +131,8 @@ class VoiceChatSession:
                 ),
             )
 
-            async with _client.aio.live.connect(model=NATIVE_AUDIO_MODEL, config=config) as session:
+            client = get_gemini_client()
+            async with client.aio.live.connect(model=NATIVE_AUDIO_MODEL, config=config) as session:
                 self.live_session = session
                 self.last_activity = time.time()
 
