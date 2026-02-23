@@ -281,6 +281,18 @@ async def handle_voice_kick(request):
     except Exception as e:
         return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
+
+async def handle_voice_debug(request):
+    bot = request.app["bot"]
+    sessions = getattr(bot, "voice_sessions", {})
+    debug_data = {}
+    for gid, session in sessions.items():
+        if hasattr(session, "get_debug_info"):
+            debug_data[str(gid)] = session.get_debug_info()
+    if not debug_data:
+        debug_data["status"] = "no_active_session"
+    return web.Response(text=json.dumps(debug_data, ensure_ascii=False, default=str), content_type="application/json")
+
 # ─── HTML ────────────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -474,6 +486,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <div class="tab" onclick="showPage('roasts')">🔥 الذبات</div>
     <div class="tab" onclick="showPage('analytics')">📈 التحليلات</div>
     <div class="tab" onclick="showPage('members')">👥 الأعضاء</div>
+    <div class="tab" onclick="showPage('debug')">🔧 Debug</div>
   </div>
 
   <!-- ═══ PAGE: OVERVIEW ═══ -->
@@ -702,8 +715,67 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         <div class="card-head"><h2>📊 سجل المحادثات الصوتية</h2><span class="badge badge-purple" id="voice-log-count">0</span></div>
         <div class="card-body" id="voice-log-list" style="max-height:350px"><div class="empty">لا توجد محادثات بعد</div></div>
       </div>
+  </div>
+
+  <!-- ═══ PAGE: DEBUG ═══ -->
+  <div class="page" id="page-debug">
+    <div class="grid">
+      <div class="card">
+        <div class="card-head"><h2>🔧 Voice Debug – حالة الجلسة</h2><button class="btn btn-sm btn-blue" onclick="loadDebug()">🔄 تحديث</button></div>
+        <div class="card-body">
+          <div class="grid3" style="gap:.8rem">
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">الحالة</div>
+              <div id="dbg-status" style="font-size:1.1rem;font-weight:bold">—</div>
+            </div>
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">المتحدث النشط</div>
+              <div id="dbg-speaker" style="font-size:1.1rem;font-weight:bold">—</div>
+            </div>
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">البوت يتكلم؟</div>
+              <div id="dbg-playing" style="font-size:1.1rem;font-weight:bold">—</div>
+            </div>
+          </div>
+          <div class="grid3" style="gap:.8rem;margin-top:.8rem">
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">📥 Audio Received</div>
+              <div id="dbg-recv" style="font-size:1.3rem;font-weight:bold;color:#22c55e">0</div>
+            </div>
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">📤 Sent to Gemini</div>
+              <div id="dbg-sent" style="font-size:1.3rem;font-weight:bold;color:#3b82f6">0</div>
+            </div>
+            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
+              <div style="font-size:.7rem;color:var(--muted)">🤖 Gemini Responses</div>
+              <div id="dbg-gemini" style="font-size:1.3rem;font-weight:bold;color:#a855f7">0</div>
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns:1fr 1fr;gap:.8rem;margin-top:.8rem">
+            <div style="padding:.5rem;background:var(--bg2);border-radius:8px">
+              <span style="font-size:.7rem;color:var(--muted)">Input Buffer:</span>
+              <strong id="dbg-buffer">0 bytes</strong>
+            </div>
+            <div style="padding:.5rem;background:var(--bg2);border-radius:8px">
+              <span style="font-size:.7rem;color:var(--muted)">آخر نشاط قبل:</span>
+              <strong id="dbg-lastact">—</strong>
+            </div>
+          </div>
+          <div style="margin-top:.8rem;padding:.5rem;background:var(--bg2);border-radius:8px">
+            <span style="font-size:.7rem;color:var(--muted)">المشاركين:</span>
+            <span id="dbg-participants">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="card full">
+        <div class="card-head"><h2>📋 Event Log</h2><span class="badge badge-purple" id="dbg-log-count">0</span></div>
+        <div class="card-body" id="dbg-log" style="max-height:500px;overflow-y:auto;font-family:monospace;font-size:.75rem;direction:ltr;text-align:left">
+          <div class="empty">لا توجد جلسة أو أحداث بعد</div>
+        </div>
+      </div>
     </div>
   </div>
+
 </div>
 
 <script>
@@ -715,6 +787,8 @@ function showPage(id){
   document.getElementById('page-'+id).classList.add('active');
   event.target.classList.add('active');
   if(id==='analytics') renderCharts();
+  if(id==='debug'){loadDebug();debugInterval=setInterval(loadDebug,3000)}
+  else{if(debugInterval){clearInterval(debugInterval);debugInterval=null}}
 }
 
 function toggleTheme(){
@@ -962,6 +1036,46 @@ async function removeVoiceIgnore(mid){
 }
 
 loadData();setInterval(loadData,20000);
+
+// ─── Debug Tab ───
+let debugInterval=null;
+async function loadDebug(){
+  try{
+    const r=await fetch('/api/voice_debug');
+    const d=await r.json();
+    if(d.status==='no_active_session'){
+      document.getElementById('dbg-status').innerHTML='<span style="color:#ef4444">⚫ لا توجد جلسة</span>';
+      document.getElementById('dbg-speaker').textContent='—';
+      document.getElementById('dbg-playing').textContent='—';
+      document.getElementById('dbg-recv').textContent='0';
+      document.getElementById('dbg-sent').textContent='0';
+      document.getElementById('dbg-gemini').textContent='0';
+      document.getElementById('dbg-buffer').textContent='0 bytes';
+      document.getElementById('dbg-lastact').textContent='—';
+      document.getElementById('dbg-participants').textContent='—';
+      document.getElementById('dbg-log').innerHTML='<div class="empty">لا توجد جلسة نشطة</div>';
+      document.getElementById('dbg-log-count').textContent='0';
+      return;
+    }
+    const s=Object.values(d)[0];
+    document.getElementById('dbg-status').innerHTML=s.running?'<span style="color:#22c55e">🟢 شغّال</span>':'<span style="color:#ef4444">⚫ متوقف</span>';
+    document.getElementById('dbg-speaker').textContent=s.active_speaker||'ما حد';
+    document.getElementById('dbg-playing').innerHTML=s.is_playing?'<span style="color:#f59e0b">🔊 نعم</span>':'<span style="color:#64748b">🔇 لا</span>';
+    document.getElementById('dbg-recv').textContent=s.audio_recv_count||0;
+    document.getElementById('dbg-sent').textContent=s.audio_send_count||0;
+    document.getElementById('dbg-gemini').textContent=s.gemini_recv_count||0;
+    document.getElementById('dbg-buffer').textContent=(s.input_buffer_bytes||0)+' bytes';
+    document.getElementById('dbg-lastact').textContent=(s.last_activity_ago||0)+'s ago';
+    document.getElementById('dbg-participants').textContent=(s.participants||[]).join('، ')||'ما حد';
+    const log=s.log||[];
+    document.getElementById('dbg-log-count').textContent=log.length;
+    const colors={SESSION_START:'#22c55e',AUDIO_SENT:'#3b82f6',GEMINI_RESPONSE:'#a855f7',PLAY_START:'#f59e0b',PLAY_CONVERTED:'#f59e0b',PLAY_DONE:'#06b6d4'};
+    document.getElementById('dbg-log').innerHTML=log.length?log.slice().reverse().map(e=>{
+      const c=colors[e.event]||'#94a3b8';
+      return '<div style="padding:2px 4px;border-bottom:1px solid var(--border)"><span style="color:#64748b">'+e.elapsed+'s</span> <span style="color:'+c+';font-weight:bold">'+e.event+'</span> <span style="color:var(--text)">'+e.detail+'</span></div>';
+    }).join(''):'<div class="empty">لا توجد أحداث</div>';
+  }catch(e){console.error('Debug load error:',e)}
+}
 </script>
 </body>
 </html>"""
@@ -988,6 +1102,7 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/voice_ignore",   handle_voice_ignore)
     app.router.add_post("/api/voice_kick",     handle_voice_kick)
     app.router.add_post("/api/protect",       handle_protect)
+    app.router.add_get("/api/voice_debug",    handle_voice_debug)
     return app
 
 
