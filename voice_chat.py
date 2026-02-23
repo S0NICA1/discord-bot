@@ -1,7 +1,6 @@
 """
 voice_chat.py – محادثة صوتية تفاعلية لبوت مستر ذبات
-وضع Walkie-Talkie: يستمع → يرد → يستمع
-مع أوامر صوتية للتحكم بالفويس
+نظام: Streaming مع تركيز على متحدث واحد
 """
 import asyncio
 import audioop
@@ -14,7 +13,6 @@ import discord
 from google import genai
 from google.genai import types
 
-# محاولة تحميل مكتبة استقبال الصوت
 try:
     import discord.ext.voice_recv as voice_recv
     HAS_VOICE_RECV = True
@@ -23,7 +21,6 @@ except ImportError:
     print("⚠️ discord-ext-voice-recv not installed – voice chat disabled")
 
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
-LISTEN_DURATION = 15  # مدة الاستماع بالثواني
 _client = None
 
 def _get_client():
@@ -34,7 +31,7 @@ def _get_client():
 
 
 class VoiceChatSession:
-    """جلسة محادثة صوتية – وضع Walkie-Talkie."""
+    """جلسة محادثة صوتية – تركيز على متحدث واحد."""
 
     def __init__(self, bot, guild_id, voice_channel, text_channel, requester):
         self.bot = bot
@@ -49,11 +46,17 @@ class VoiceChatSession:
         self.last_activity = time.time()
         self.start_time = time.time()
         self._loop = None
+        self._tasks = []
 
-        # Audio buffers
-        self._input_buffer = bytearray()  # صوت المستخدمين
-        self._is_playing = False
-        self._is_listening = True
+        # تحكم بالمتحدث
+        self._active_speaker = None       # المتحدث الحالي (user object)
+        self._active_speaker_id = None    # ID المتحدث الحالي
+        self._speaker_lock_time = 0       # متى بدأ يتكلم
+        self._speaker_silence = 0         # آخر مرة سمعنا صوته
+        self._is_playing = False          # هل البوت يتكلم الآن
+
+        # تجميع الصوت
+        self._input_buffer = bytearray()
 
         # تتبع
         self.messages_exchanged = 0
@@ -78,43 +81,36 @@ class VoiceChatSession:
             )
         else:
             personas = {
-                "troll": "شاب سعودي Gen Z طقطوقي مبدع. ذباتك قوية تكسر الجبهة. لغة جيمنج معربة.",
-                "boomer": "شايب سعودي معصب يعتبر الديسكورد تضييع وقت. تذب عليهم أنهم جيل ضايع.",
-                "tryhard": "لاعب إيسبورتس أجنبي متعالي تتكلم عربي مكسر وتحتقر لعبهم.",
-                "psycho": "شخصية غامضة مخيفة. ذباتك هادية بس مرعبة ومستفزة.",
+                "troll": "شاب سعودي Gen Z طقطوقي مبدع. ذباتك قوية تكسر الجبهة.",
+                "boomer": "شايب سعودي معصب يعتبر الديسكورد تضييع وقت.",
+                "tryhard": "لاعب إيسبورتس أجنبي متعالي تتكلم عربي مكسر.",
+                "psycho": "شخصية غامضة مخيفة. ذباتك هادية بس مرعبة.",
             }
             txt = f"أنت 'مستر ذبات'، {personas.get(persona, personas['troll'])}"
 
-        # أوامر التحكم بالفويس
         members_list = self._get_channel_members()
-
         txt += (
             "\n\nقواعد مهمة:"
-            "\n- ردودك قصيرة (جملة إلى ثلاث جمل) لأنك بمحادثة صوتية."
-            "\n- لا تقل 'طيب' أو 'حسناً' كثير، خلك طبيعي."
-            "\n- إذا ما سمعت شيء واضح قل 'وش قلت؟' أو 'ما فهمت عليك'."
-            "\n\n=== أوامر التحكم بالفويس ==="
-            "\nإذا أحد قال لك أي شيء من هذي الأوامر، نفذها بالضبط:"
-            "\n- 'اطرد [اسم]' أو 'طرد [اسم]' أو 'kick [اسم]' → رد عادي ثم أضف في نهاية ردك: [CMD:KICK:الاسم]"
-            "\n- 'بوت اطلع' أو 'اطلع' أو 'روح' → رد وداع ثم أضف: [CMD:LEAVE]"
-            "\n- 'اسكت [اسم]' أو 'سكت [اسم]' أو 'mute [اسم]' → رد عادي ثم أضف: [CMD:MUTE:الاسم]"
-            "\n- مهم: الأمر [CMD:...] لازم يكون آخر شيء بالرد وبالضبط بهذا الشكل."
-            f"\n\nالأعضاء الموجودين بالروم حالياً: {members_list}"
+            "\n- ردودك قصيرة (جملة أو جملتين)."
+            "\n- خلك طبيعي وعفوي."
+            "\n- إذا ما سمعت شيء واضح قل 'وش قلت؟'"
+            "\n\n=== أوامر التحكم ==="
+            "\n- 'اطرد [اسم]' → رد ثم أضف: [CMD:KICK:الاسم]"
+            "\n- 'بوت اطلع' أو 'روح' → رد وداع ثم أضف: [CMD:LEAVE]"
+            "\n- 'اسكت [اسم]' → رد ثم أضف: [CMD:MUTE:الاسم]"
+            f"\n\nالموجودين بالروم: {members_list}"
         )
 
-        # ذاكرة المحادثة
         mem = getattr(self.bot, "voice_conversation_memory", {})
         user_mem = mem.get(self.requester.id, [])
         if user_mem:
-            txt += f"\n\nتعرف هذا الشخص من قبل. آخر سوالفكم: {', '.join(user_mem[-5:])}"
+            txt += f"\n\nتعرف هذا الشخص. آخر سوالفكم: {', '.join(user_mem[-5:])}"
 
         return txt
 
     def _get_channel_members(self):
-        """أسماء الأعضاء بالروم الصوتي."""
         try:
-            names = [m.display_name for m in self.voice_channel.members if not m.bot]
-            return "، ".join(names) if names else "ما حد"
+            return "، ".join(m.display_name for m in self.voice_channel.members if not m.bot) or "ما حد"
         except:
             return "غير معروف"
 
@@ -126,29 +122,19 @@ class VoiceChatSession:
             guild = self.bot.get_guild(self.guild_id)
             if guild and guild.voice_client:
                 await guild.voice_client.disconnect(force=True)
+                await asyncio.sleep(1)
 
             if HAS_VOICE_RECV:
                 try:
                     self.voice_client = await asyncio.wait_for(
-                        self.voice_channel.connect(cls=voice_recv.VoiceRecvClient),
-                        timeout=30
+                        self.voice_channel.connect(cls=voice_recv.VoiceRecvClient), timeout=30
                     )
                 except (TimeoutError, asyncio.TimeoutError):
-                    print("[VoiceChat] VoiceRecvClient timeout, retrying...")
-                    try:
-                        guild = self.bot.get_guild(self.guild_id)
-                        if guild and guild.voice_client:
-                            await guild.voice_client.disconnect(force=True)
-                        self.voice_client = await asyncio.wait_for(
-                            self.voice_channel.connect(cls=voice_recv.VoiceRecvClient),
-                            timeout=30
-                        )
-                    except (TimeoutError, asyncio.TimeoutError):
-                        print("[VoiceChat] Fallback to normal VoiceClient")
-                        guild = self.bot.get_guild(self.guild_id)
-                        if guild and guild.voice_client:
-                            await guild.voice_client.disconnect(force=True)
-                        self.voice_client = await self.voice_channel.connect()
+                    print("[VoiceChat] VoiceRecvClient timeout, trying normal...")
+                    guild = self.bot.get_guild(self.guild_id)
+                    if guild and guild.voice_client:
+                        await guild.voice_client.disconnect(force=True)
+                    self.voice_client = await self.voice_channel.connect()
             else:
                 self.voice_client = await self.voice_channel.connect()
 
@@ -165,7 +151,7 @@ class VoiceChatSession:
             except:
                 pass
 
-    # ─── الحلقة الرئيسية (Walkie-Talkie) ─────────────────────────────
+    # ─── الجلسة الرئيسية ──────────────────────────────────────────────
 
     async def _run_session(self):
         try:
@@ -181,153 +167,40 @@ class VoiceChatSession:
             )
 
             client = _get_client()
-            async with client.aio.live.connect(
-                model=LIVE_MODEL, config=config
-            ) as session:
+            async with client.aio.live.connect(model=LIVE_MODEL, config=config) as session:
                 self.live_session = session
                 self.last_activity = time.time()
 
-                # بدء الاستماع
                 if HAS_VOICE_RECV and hasattr(self.voice_client, "listen"):
                     self.voice_client.listen(voice_recv.BasicSink(self._on_voice_data))
 
+                self._tasks = [
+                    asyncio.create_task(self._send_audio_loop()),
+                    asyncio.create_task(self._recv_audio_loop()),
+                    asyncio.create_task(self._play_audio_loop()),
+                    asyncio.create_task(self._speaker_manager()),
+                    asyncio.create_task(self._silence_watch()),
+                ]
+
                 try:
                     await self.text_channel.send(
-                        "🎤 دخلت الروم! بسمع لكم وأرد.\n"
-                        "📢 أوامر صوتية: **اطرد [اسم]** | **بوت اطلع**"
+                        "🎤 دخلت الروم! تكلموا واحد واحد وأنا أرد عليكم.\n"
+                        "📢 أوامر: **اطرد [اسم]** | **بوت اطلع**"
                     )
                 except:
                     pass
-
                 self._log("active")
-                print(f"[VoiceChat] Started in '{self.voice_channel.name}' by {self.requester}")
+                print(f"[VoiceChat] Started in '{self.voice_channel.name}'")
 
-                # ─── دورة Walkie-Talkie ───
                 while self.running:
-                    # 1️⃣ مرحلة الاستماع
-                    self._is_listening = True
-                    self._is_playing = False
-                    self._input_buffer.clear()
-
-                    # انتظر صوت أو timeout
-                    listen_start = time.time()
-                    has_audio = False
-
-                    while self.running and (time.time() - listen_start) < LISTEN_DURATION:
-                        await asyncio.sleep(0.3)
-                        if len(self._input_buffer) > 0:
-                            has_audio = True
-                            # بعد ما يبدأ الصوت، كمّل سماع لحد ما يسكت أو ينتهي الوقت
-                            silence_start = None
-                            while self.running and (time.time() - listen_start) < LISTEN_DURATION:
-                                await asyncio.sleep(0.2)
-                                buf_len = len(self._input_buffer)
-                                # إذا توقف الصوت لـ 2 ثانية، خلاص فهمنا
-                                if buf_len == getattr(self, "_last_buf_len", 0):
-                                    if silence_start is None:
-                                        silence_start = time.time()
-                                    elif time.time() - silence_start > 2.0:
-                                        break
-                                else:
-                                    silence_start = None
-                                self._last_buf_len = buf_len
-                            break
-
-                    if not self.running:
-                        break
-
-                    # إذا ما في صوت، تحقق من timeout السكوت
-                    if not has_audio:
-                        leave_sec = getattr(self.bot, "voice_auto_leave_sec", 120)
-                        if time.time() - self.last_activity > leave_sec:
-                            try:
-                                await self.text_channel.send("🔇 ما حد يتكلم.. أنا طالع! 👋")
-                            except:
-                                pass
-                            await self.stop(reason="سكوت")
-                            return
-                        continue
-
-                    # 2️⃣ إرسال الصوت المجمّع لـ Gemini
-                    self._is_listening = False
-                    audio_data = bytes(self._input_buffer)
-                    self._input_buffer.clear()
-
-                    if len(audio_data) < 640:  # أقل من 20ms – تجاهل
-                        continue
-
-                    try:
-                        await session.send_realtime_input(
-                            audio={"data": audio_data, "mime_type": "audio/pcm;rate=16000"}
-                        )
-                    except Exception as e:
-                        print(f"[VoiceChat] Send error: {e}")
-                        continue
-
-                    # 3️⃣ استقبال الرد الكامل
-                    self._is_playing = True
-                    audio_response = bytearray()
-                    text_response = ""
-
-                    try:
-                        turn = session.receive()
-                        async for response in turn:
-                            if not self.running:
-                                break
-
-                            sc = getattr(response, "server_content", None)
-
-                            # مقاطعة
-                            if sc and getattr(sc, "interrupted", False):
-                                audio_response.clear()
-                                break
-
-                            # استخلاص الصوت
-                            if sc and sc.model_turn:
-                                for part in sc.model_turn.parts:
-                                    idata = getattr(part, "inline_data", None)
-                                    if idata and isinstance(idata.data, bytes):
-                                        audio_response.extend(idata.data)
-                                    # استخلاص النص (للأوامر)
-                                    if hasattr(part, "text") and part.text:
-                                        text_response += part.text
-
-                    except Exception as e:
-                        print(f"[VoiceChat] Recv error: {e}")
-
-                    # 4️⃣ تشغيل الرد
-                    if audio_response and self.running:
-                        try:
-                            pcm_48k, _ = audioop.ratecv(
-                                bytes(audio_response), 2, 1, 24000, 48000, None
-                            )
-                            pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
-
-                            if self.voice_client and self.voice_client.is_connected():
-                                src = discord.PCMAudio(io.BytesIO(pcm_stereo))
-                                if self.voice_client.is_playing():
-                                    self.voice_client.stop()
-                                finished = asyncio.Event()
-                                self.voice_client.play(
-                                    src,
-                                    after=lambda e: self._loop.call_soon_threadsafe(finished.set),
-                                )
-                                await asyncio.wait_for(finished.wait(), timeout=120)
-                        except Exception as e:
-                            print(f"[VoiceChat] Play error: {e}")
-
-                    self._is_playing = False
-                    self.messages_exchanged += 1
-                    self.last_activity = time.time()
-
-                    # 5️⃣ تنفيذ الأوامر الصوتية
-                    if text_response:
-                        await self._handle_voice_commands(text_response)
+                    await asyncio.sleep(1)
 
         except Exception as e:
             traceback.print_exc()
         finally:
             self.running = False
+            for t in self._tasks:
+                t.cancel()
             if self.voice_client and self.voice_client.is_connected():
                 try:
                     if hasattr(self.voice_client, "stop_listening"):
@@ -337,17 +210,31 @@ class VoiceChatSession:
                     pass
             self.bot.voice_sessions.pop(self.guild_id, None)
 
-    # ─── استقبال صوت الأعضاء (sync callback) ────────────────────────
+    # ─── استقبال صوت الأعضاء ──────────────────────────────────────────
 
     def _on_voice_data(self, user, data):
-        """يُنادى من thread آخر."""
-        if not self.running or user.bot or not self._is_listening or self._is_playing:
+        """Sync callback – يقبل صوت المتحدث النشط فقط."""
+        if not self.running or user.bot or self._is_playing:
             return
         if user.id in getattr(self.bot, "voice_ignored_users", set()):
             return
 
+        now = time.time()
+
+        # إذا ما في متحدث نشط، هذا يصير المتحدث
+        if self._active_speaker_id is None:
+            self._active_speaker_id = user.id
+            self._active_speaker = user
+            self._speaker_lock_time = now
+            print(f"[VoiceChat] 🔒 Locked to: {user.display_name}")
+
+        # فقط المتحدث النشط يسمعه البوت
+        if user.id != self._active_speaker_id:
+            return
+
+        self._speaker_silence = now
         self.participants.add(user.display_name)
-        self.last_activity = time.time()
+        self.last_activity = now
 
         try:
             raw = data.pcm if hasattr(data, "pcm") else bytes(data)
@@ -357,38 +244,184 @@ class VoiceChatSession:
         except Exception:
             pass
 
-    # ─── تنفيذ أوامر الفويس ──────────────────────────────────────────
+    # ─── إدارة المتحدث النشط ──────────────────────────────────────────
+
+    async def _speaker_manager(self):
+        """يراقب المتحدث – إذا سكت 3 ثواني يفتح لغيره."""
+        while self.running:
+            await asyncio.sleep(0.5)
+            if self._active_speaker_id and not self._is_playing:
+                silence = time.time() - self._speaker_silence
+                if silence > 3.0:  # سكت 3 ثواني
+                    old = self._active_speaker.display_name if self._active_speaker else "?"
+                    self._active_speaker_id = None
+                    self._active_speaker = None
+                    print(f"[VoiceChat] 🔓 Released from: {old}")
+
+    # ─── إرسال الصوت لـ Gemini ────────────────────────────────────────
+
+    async def _send_audio_loop(self):
+        """تجميع وإرسال صوت المتحدث كل 250ms."""
+        while self.running:
+            await asyncio.sleep(0.25)
+            if not self._input_buffer or not self.live_session or self._is_playing:
+                continue
+
+            batch = bytes(self._input_buffer)
+            self._input_buffer.clear()
+
+            try:
+                await self.live_session.send_realtime_input(
+                    audio={"data": batch, "mime_type": "audio/pcm;rate=16000"}
+                )
+            except Exception as e:
+                print(f"[VoiceChat] Send error: {e}")
+
+    # ─── استقبال ردود Gemini ──────────────────────────────────────────
+
+    _output_queue = None
+
+    async def _recv_audio_loop(self):
+        """استقبال الصوت من Gemini وتمريره للتشغيل."""
+        self._output_queue = asyncio.Queue()
+        try:
+            while self.running:
+                try:
+                    turn = self.live_session.receive()
+                    turn_audio = bytearray()
+                    text_parts = ""
+
+                    async for response in turn:
+                        if not self.running:
+                            return
+
+                        sc = getattr(response, "server_content", None)
+
+                        # مقاطعة
+                        if sc and getattr(sc, "interrupted", False):
+                            turn_audio.clear()
+                            if self.voice_client and self.voice_client.is_playing():
+                                self.voice_client.stop()
+                            while not self._output_queue.empty():
+                                try: self._output_queue.get_nowait()
+                                except: pass
+                            continue
+
+                        # استخلاص الصوت والنص
+                        if sc and sc.model_turn:
+                            for part in sc.model_turn.parts:
+                                idata = getattr(part, "inline_data", None)
+                                if idata and isinstance(idata.data, bytes):
+                                    turn_audio.extend(idata.data)
+                                if hasattr(part, "text") and part.text:
+                                    text_parts += part.text
+
+                    # رد كامل جاهز
+                    if turn_audio:
+                        self._output_queue.put_nowait(
+                            {"audio": bytes(turn_audio), "text": text_parts}
+                        )
+                        self.messages_exchanged += 1
+                        self.last_activity = time.time()
+
+                except Exception as e:
+                    if self.running:
+                        print(f"[VoiceChat] Recv error: {e}")
+                    await asyncio.sleep(0.5)
+
+        except Exception as e:
+            if self.running:
+                print(f"[VoiceChat] Recv loop error: {e}")
+
+    # ─── تشغيل الصوت ─────────────────────────────────────────────────
+
+    async def _play_audio_loop(self):
+        """تشغيل ردود Gemini بالفويس."""
+        while self.running:
+            try:
+                if self._output_queue is None:
+                    await asyncio.sleep(0.2)
+                    continue
+
+                item = await asyncio.wait_for(self._output_queue.get(), timeout=1.0)
+                audio_data = item["audio"]
+                text_data = item.get("text", "")
+
+                self._is_playing = True
+                # مسح buffer الإدخال عشان ما يتراكم صوت أثناء الرد
+                self._input_buffer.clear()
+
+                try:
+                    pcm_48k, _ = audioop.ratecv(audio_data, 2, 1, 24000, 48000, None)
+                    pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
+
+                    if self.voice_client and self.voice_client.is_connected():
+                        src = discord.PCMAudio(io.BytesIO(pcm_stereo))
+                        if self.voice_client.is_playing():
+                            self.voice_client.stop()
+                        finished = asyncio.Event()
+                        self.voice_client.play(
+                            src,
+                            after=lambda e: self._loop.call_soon_threadsafe(finished.set),
+                        )
+                        await asyncio.wait_for(finished.wait(), timeout=120)
+                except Exception as e:
+                    print(f"[VoiceChat] Play error: {e}")
+
+                self._is_playing = False
+                # بعد ما يخلص الرد، يفتح لأي شخص يتكلم
+                self._active_speaker_id = None
+                self._active_speaker = None
+
+                # تنفيذ أوامر صوتية
+                if text_data:
+                    await self._handle_voice_commands(text_data)
+
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                self._is_playing = False
+                if self.running:
+                    print(f"[VoiceChat] Play loop error: {e}")
+
+    # ─── مراقبة السكوت ───────────────────────────────────────────────
+
+    async def _silence_watch(self):
+        leave_sec = getattr(self.bot, "voice_auto_leave_sec", 120)
+        while self.running:
+            await asyncio.sleep(10)
+            if time.time() - self.last_activity > leave_sec:
+                try:
+                    await self.text_channel.send("🔇 ما حد يتكلم.. أنا طالع! 👋")
+                except:
+                    pass
+                await self.stop(reason="سكوت")
+                break
+
+    # ─── أوامر صوتية ─────────────────────────────────────────────────
 
     async def _handle_voice_commands(self, text):
-        """تحليل رد Gemini وتنفيذ الأوامر."""
-        # أمر الخروج
         if "[CMD:LEAVE]" in text:
             await self.stop(reason="أمر صوتي")
             return
 
-        # أمر الطرد
         kick_match = re.search(r"\[CMD:KICK:(.+?)\]", text)
         if kick_match:
-            target_name = kick_match.group(1).strip()
-            await self._kick_member(target_name)
+            name = kick_match.group(1).strip()
+            await self._kick_member(name)
 
-        # أمر السكوت
         mute_match = re.search(r"\[CMD:MUTE:(.+?)\]", text)
         if mute_match:
-            target_name = mute_match.group(1).strip()
-            await self._mute_member(target_name)
+            name = mute_match.group(1).strip()
+            await self._mute_member(name)
 
     async def _kick_member(self, name):
-        """طرد عضو من الفويس بالاسم."""
         try:
-            guild = self.bot.get_guild(self.guild_id)
-            if not guild:
-                return
             for member in self.voice_channel.members:
                 if name.lower() in member.display_name.lower():
                     await member.move_to(None)
                     try:
-                        await self.text_channel.send(f"👢 {member.display_name} انطرد من الفويس!")
+                        await self.text_channel.send(f"👢 {member.display_name} انطرد!")
                     except:
                         pass
                     return
@@ -400,11 +433,7 @@ class VoiceChatSession:
             print(f"[VoiceChat] Kick error: {e}")
 
     async def _mute_member(self, name):
-        """سكوت عضو بالفويس."""
         try:
-            guild = self.bot.get_guild(self.guild_id)
-            if not guild:
-                return
             for member in self.voice_channel.members:
                 if name.lower() in member.display_name.lower():
                     await member.edit(mute=True)
@@ -416,13 +445,15 @@ class VoiceChatSession:
         except Exception as e:
             print(f"[VoiceChat] Mute error: {e}")
 
-    # ─── إيقاف الجلسة ────────────────────────────────────────────────
+    # ─── إيقاف ────────────────────────────────────────────────────────
 
     async def stop(self, reason="يدوي"):
         if not self.running:
             return
         self.running = False
 
+        for t in self._tasks:
+            t.cancel()
         if hasattr(self, "_connection_task"):
             self._connection_task.cancel()
 
@@ -434,7 +465,6 @@ class VoiceChatSession:
             except:
                 pass
 
-        # ملخص
         dur = max(1, int((time.time() - self.start_time) / 60))
         parts = "، ".join(self.participants) if self.participants else "ما حد"
         summary = (
@@ -447,7 +477,6 @@ class VoiceChatSession:
         except:
             pass
 
-        # حفظ الذاكرة
         mem = self.bot.voice_conversation_memory
         for name in self.participants:
             for guild in self.bot.guilds:
@@ -456,28 +485,20 @@ class VoiceChatSession:
                         mem.setdefault(m.id, []).append(f"محادثة صوتية ({dur}د)")
                         mem[m.id] = mem[m.id][-10:]
 
-        # تحديث السجل
         if self.bot.voice_session_log:
             self.bot.voice_session_log[-1].update({
-                "end": time.time(),
-                "messages": self.messages_exchanged,
-                "status": "ended",
-                "participants": list(self.participants),
-                "reason": reason,
+                "end": time.time(), "messages": self.messages_exchanged,
+                "status": "ended", "participants": list(self.participants), "reason": reason,
             })
-
         self.bot.voice_sessions.pop(self.guild_id, None)
-        print(f"[VoiceChat] Session ended: {reason}")
+        print(f"[VoiceChat] Ended: {reason}")
 
-    # ─── سجل ────────────────────────────────────────────────────────
+    # ─── سجل ──────────────────────────────────────────────────────────
 
     def _log(self, status):
         self.bot.voice_session_log.append({
-            "start": time.time(),
-            "requester": self.requester.display_name,
-            "channel": self.voice_channel.name,
-            "end": None,
-            "messages": 0,
-            "status": status,
+            "start": time.time(), "requester": self.requester.display_name,
+            "channel": self.voice_channel.name, "end": None,
+            "messages": 0, "status": status,
         })
         self.bot.voice_session_log = self.bot.voice_session_log[-30:]
