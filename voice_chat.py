@@ -48,8 +48,11 @@ class VoiceChatSession:
         self.last_activity = time.time()
         self.start_time = time.time()
         self._tasks = []
-        self._output_queue = asyncio.Queue()
+        self._audio_buffer = bytearray()  # streaming buffer
+        self._buffer_lock = asyncio.Lock()
+        self._new_audio = asyncio.Event()  # إشارة وصول صوت جديد
         self._is_playing = False
+        self._turn_done = asyncio.Event()  # إشارة انتهاء الـ turn
         self._loop = None  # سيتم تعيينه عند التشغيل
 
         # تتبع
@@ -225,12 +228,12 @@ class VoiceChatSession:
     # ─── استقبال ردود Gemini ──────────────────────────────────────────
 
     async def _recv_loop(self):
-        """حلقة استقبال مستمرة – تجمع كل قطع الصوت لكل turn ثم تشغلها دفعة واحدة."""
+        """استقبال مستمر – يمرر كل قطعة صوت فوراً للـ buffer."""
         try:
             while self.running:
                 try:
                     turn = self.live_session.receive()
-                    turn_audio = bytearray()  # تجميع كل الأجزاء الصوتية لهذا الـ turn
+                    self._turn_done.clear()
 
                     async for response in turn:
                         if not self.running:
@@ -239,60 +242,85 @@ class VoiceChatSession:
                         # التحقق من المقاطعة
                         sc = getattr(response, "server_content", None)
                         if sc and getattr(sc, "interrupted", False):
-                            turn_audio.clear()
+                            async with self._buffer_lock:
+                                self._audio_buffer.clear()
                             if self.voice_client and self.voice_client.is_playing():
                                 self.voice_client.stop()
-                            while not self._output_queue.empty():
-                                try: self._output_queue.get_nowait()
-                                except: pass
                             continue
 
-                        # استخلاص الصوت من response.data (الطريقة الأساسية)
+                        # استخلاص الصوت فوراً
+                        chunk = None
                         if response.data is not None:
-                            turn_audio.extend(response.data)
-                            continue
-
-                        # طريقة بديلة: server_content.model_turn
-                        if sc and sc.model_turn:
+                            chunk = response.data
+                        elif sc and sc.model_turn:
+                            buf = bytearray()
                             for part in sc.model_turn.parts:
                                 idata = getattr(part, "inline_data", None)
                                 if idata and isinstance(idata.data, bytes):
-                                    turn_audio.extend(idata.data)
+                                    buf.extend(idata.data)
+                            if buf:
+                                chunk = bytes(buf)
 
-                    # بعد انتهاء الـ turn كامل، أرسل الصوت المجمّع للتشغيل
-                    if turn_audio:
-                        self._output_queue.put_nowait(bytes(turn_audio))
-                        self.messages_exchanged += 1
-                        self.last_activity = time.time()
+                        if chunk:
+                            # تحويل فوري 24kHz mono → 48kHz stereo
+                            try:
+                                pcm_48k, _ = audioop.ratecv(chunk, 2, 1, 24000, 48000, None)
+                                stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
+                                async with self._buffer_lock:
+                                    self._audio_buffer.extend(stereo)
+                                self._new_audio.set()
+                            except Exception:
+                                pass
+
+                    # انتهى الـ turn
+                    self._turn_done.set()
+                    self.messages_exchanged += 1
+                    self.last_activity = time.time()
 
                 except Exception as inner_e:
                     if self.running:
                         print(f"[VoiceChat] Recv turn error: {inner_e}")
+                    self._turn_done.set()
                     await asyncio.sleep(0.5)
 
         except Exception as e:
             if self.running:
                 print(f"[VoiceChat] Recv loop error: {e}")
 
-    # ─── تشغيل الصوت بالديسكورد ─────────────────────────────────────────
+    # ─── تشغيل الصوت بالديسكورد (streaming) ──────────────────────────────
 
     async def _play_loop(self):
-        """تشغيل المقاطع المجمعة من Gemini بالفويس."""
+        """تشغيل الصوت بشكل متواصل من الـ buffer."""
+        FRAME_SIZE = 3840  # 20ms عند 48kHz stereo 16-bit
+        MIN_BUFFER = FRAME_SIZE * 5  # ~100ms قبل ما نبدأ التشغيل
+
         while self.running:
             try:
-                data = await asyncio.wait_for(self._output_queue.get(), timeout=1.0)
+                # انتظر وصول صوت جديد
+                try:
+                    await asyncio.wait_for(self._new_audio.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                self._new_audio.clear()
+
+                # انتظر تجمع حد أدنى من البيانات (~100ms)
+                for _ in range(10):
+                    async with self._buffer_lock:
+                        if len(self._audio_buffer) >= MIN_BUFFER:
+                            break
+                    await asyncio.sleep(0.02)
+
+                # اسحب كل الصوت المتاح حالياً
+                async with self._buffer_lock:
+                    if not self._audio_buffer:
+                        continue
+                    pcm_data = bytes(self._audio_buffer)
+                    self._audio_buffer.clear()
+
                 self._is_playing = True
 
-                # Gemini يرسل 24kHz mono 16-bit → نحول لـ 48kHz stereo لديسكورد
-                try:
-                    pcm_48k, _ = audioop.ratecv(data, 2, 1, 24000, 48000, None)
-                    pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
-                except Exception:
-                    self._is_playing = False
-                    continue
-
                 if self.voice_client and self.voice_client.is_connected():
-                    src = discord.PCMAudio(io.BytesIO(pcm_stereo))
+                    src = discord.PCMAudio(io.BytesIO(pcm_data))
                     if self.voice_client.is_playing():
                         self.voice_client.stop()
                     finished = asyncio.Event()
@@ -300,11 +328,30 @@ class VoiceChatSession:
                         src,
                         after=lambda e: self._loop.call_soon_threadsafe(finished.set),
                     )
-                    await asyncio.wait_for(finished.wait(), timeout=120)
+
+                    # أثناء التشغيل، تحقق إذا وصل صوت جديد
+                    while not finished.is_set():
+                        await asyncio.sleep(0.05)
+                        if finished.is_set():
+                            break
+                        # إذا وصل صوت جديد، شغله مباشرة بعد الحالي
+                        async with self._buffer_lock:
+                            if self._audio_buffer:
+                                extra = bytes(self._audio_buffer)
+                                self._audio_buffer.clear()
+                                # انتظر الحالي يخلص ثم شغل الجديد
+                                await finished.wait()
+                                src2 = discord.PCMAudio(io.BytesIO(extra))
+                                finished2 = asyncio.Event()
+                                self.voice_client.play(
+                                    src2,
+                                    after=lambda e: self._loop.call_soon_threadsafe(finished2.set),
+                                )
+                                await finished2.wait()
+                                break
 
                 self._is_playing = False
-            except asyncio.TimeoutError:
-                self._is_playing = False
+
             except Exception as e:
                 self._is_playing = False
                 if self.running:
