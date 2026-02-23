@@ -128,7 +128,27 @@ class VoiceChatSession:
                 await guild.voice_client.disconnect(force=True)
 
             if HAS_VOICE_RECV:
-                self.voice_client = await self.voice_channel.connect(cls=voice_recv.VoiceRecvClient)
+                try:
+                    self.voice_client = await asyncio.wait_for(
+                        self.voice_channel.connect(cls=voice_recv.VoiceRecvClient),
+                        timeout=30
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    print("[VoiceChat] VoiceRecvClient timeout, retrying...")
+                    try:
+                        guild = self.bot.get_guild(self.guild_id)
+                        if guild and guild.voice_client:
+                            await guild.voice_client.disconnect(force=True)
+                        self.voice_client = await asyncio.wait_for(
+                            self.voice_channel.connect(cls=voice_recv.VoiceRecvClient),
+                            timeout=30
+                        )
+                    except (TimeoutError, asyncio.TimeoutError):
+                        print("[VoiceChat] Fallback to normal VoiceClient")
+                        guild = self.bot.get_guild(self.guild_id)
+                        if guild and guild.voice_client:
+                            await guild.voice_client.disconnect(force=True)
+                        self.voice_client = await self.voice_channel.connect()
             else:
                 self.voice_client = await self.voice_channel.connect()
 
