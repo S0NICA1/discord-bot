@@ -106,7 +106,17 @@ async def start_web_server(bot, port=None):
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
     
-    logger.info(f"Starting web dashboard on port {port}...")
-    await site.start()
+    # Try the main port, then fallback to alternative ports
+    for try_port in [port, port + 1, port + 2]:
+        try:
+            import socket
+            site = web.TCPSite(runner, '0.0.0.0', try_port, reuse_address=True)
+            logger.info(f"Starting web dashboard on port {try_port}...")
+            await site.start()
+            logger.info(f"Web dashboard running at http://localhost:{try_port}")
+            return
+        except OSError as e:
+            logger.warning(f"Port {try_port} unavailable ({e}), trying next...")
+    
+    logger.error("Could not start web dashboard on any port! Dashboard disabled.")
