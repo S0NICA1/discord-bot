@@ -5,6 +5,7 @@ from modules.listener import start_listening, stop_listening
 from modules.transcriber import load_model as load_whisper
 from modules.brain import generate_response
 from modules.speaker import speak_text_to_discord
+from modules.web import start_web_server
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -21,6 +22,9 @@ bot = discord.Bot(intents=intents)
 @bot.event
 async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    
+    # Start the web dashboard server
+    bot.loop.create_task(start_web_server(bot))
     
     # Pre-load Whisper model into memory on startup
     load_whisper()

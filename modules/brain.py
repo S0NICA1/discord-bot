@@ -1,6 +1,7 @@
 import logging
 from google import genai
-from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TEMPERATURE, TONY_PERSONA
+from config import GEMINI_API_KEY, GEMINI_MODEL
+import modules.config_sync as config_sync
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,8 @@ def generate_response(guild_id: int, user_id: int, user_name: str, text: str) ->
             model=GEMINI_MODEL,
             contents=contents,
             config=genai.types.GenerateContentConfig(
-                system_instruction=TONY_PERSONA,
-                temperature=GEMINI_TEMPERATURE,
+                system_instruction=config_sync.get_persona(),
+                temperature=config_sync.get_temperature(),
             )
         )
         

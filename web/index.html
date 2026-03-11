@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tony Bot Dashboard</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Alpine.js for lightweight reactivity -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Cairo', 'sans-serif'],
+                    },
+                    colors: {
+                        discord: '#5865F2',
+                        discordDark: '#36393f',
+                        discordDarker: '#2f3136',
+                        discordDarkest: '#202225'
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-discordDarkest text-white font-sans min-h-screen" x-data="dashboard()">
+    
+    <!-- Navbar -->
+    <nav class="bg-discordDarker shadow-lg border-b border-gray-700/50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo & Brand -->
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-discord flex items-center justify-center text-xl font-bold shadow-lg shadow-discord/20">
+                        <i class="fa-solid fa-robot"></i>
+                    </div>
+                    <span class="font-bold text-xl tracking-tight hidden sm:block">طبلون توني</span>
+                </div>
+                
+                <!-- Status Badge -->
+                <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-discordDark/50 border border-gray-700">
+                    <div class="w-2.5 h-2.5 rounded-full" :class="botStatus.status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></div>
+                    <span class="text-sm font-semibold" x-text="botStatus.status === 'online' ? 'متصل بالشبكة' : 'غير متصل'"></span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        
+        <!-- Top Stats Row -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Ping Card -->
+            <div class="glass-card rounded-2xl p-6 flex flex-col items-center justify-center gap-2">
+                <i class="fa-solid fa-wifi text-discord text-3xl mb-2"></i>
+                <div class="text-gray-400 text-sm font-semibold">استجابة البوت (Ping)</div>
+                <div class="text-3xl font-bold flex items-baseline gap-1">
+                    <span x-text="botStatus.ping || '--'"></span>
+                    <span class="text-sm text-gray-500 font-normal">ms</span>
+                </div>
+            </div>
+            
+            <!-- Guilds Card -->
+            <div class="glass-card rounded-2xl p-6 flex flex-col items-center justify-center gap-2">
+                <i class="fa-solid fa-server text-indigo-400 text-3xl mb-2"></i>
+                <div class="text-gray-400 text-sm font-semibold">عدد السيرفرات</div>
+                <div class="text-3xl font-bold" x-text="botStatus.guild_count || 0"></div>
+            </div>
+            
+            <!-- Active VCs Card -->
+            <div class="glass-card rounded-2xl p-6 flex flex-col items-center justify-center gap-2">
+                <i class="fa-solid fa-headset text-green-400 text-3xl mb-2"></i>
+                <div class="text-gray-400 text-sm font-semibold">الرومات الصوتية النشطة</div>
+                <div class="text-3xl font-bold" x-text="botStatus.active_voices?.length || 0"></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            <!-- Left Column: Settings -->
+            <div class="lg:col-span-1 space-y-6">
+                <div class="glass-card rounded-2xl p-6">
+                    <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-sliders text-discord"></i>
+                        إعدادات شخصية توني
+                    </h2>
+                    
+                    <form @submit.prevent="saveConfig" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300 mb-1">تعليمات النظام (Persona)</label>
+                            <textarea 
+                                x-model="config.persona" 
+                                rows="8" 
+                                class="w-full bg-discordDarker border border-gray-700 rounded-xl p-3 text-sm focus:ring-2 focus:ring-discord focus:border-transparent outline-none transition-all resize-y"
+                                placeholder="اكتب وصف شخصية توني هنا..."></textarea>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300 mb-1 flex justify-between">
+                                <span>مستوى الإبداع (Temperature)</span>
+                                <span x-text="config.temperature" class="text-discord font-bold"></span>
+                            </label>
+                            <input 
+                                type="range" 
+                                x-model="config.temperature" 
+                                min="0" max="2" step="0.1" 
+                                class="w-full accent-discord cursor-pointer">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>دقيق ومباشر</span>
+                                <span>مبدع وعشوائي</span>
+                            </div>
+                        </div>
+                        
+                        <button 
+                            type="submit" 
+                            class="w-full bg-discord hover:bg-indigo-500 text-white font-bold py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2"
+                            :class="{'opacity-75 cursor-wait': saving}">
+                            <i class="fa-solid fa-floppy-disk" x-show="!saving"></i>
+                            <i class="fa-solid fa-circle-notch fa-spin" x-show="saving"></i>
+                            <span x-text="saving ? 'جاري الحفظ...' : 'حفظ الإعدادات والتحديث فوراً'"></span>
+                        </button>
+                        
+                        <div x-show="saveSuccess" x-transition.opacity class="text-green-400 text-sm text-center font-semibold mt-2">
+                            ✅ تم تحديث شخصية توني بنجاح!
+                        </div>
+                    </form>
+                </div>
+                
+                <!-- Active Voices List -->
+                <div class="glass-card rounded-2xl p-6">
+                    <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-tower-broadcast text-green-400"></i>
+                        الرومات الحالية
+                    </h2>
+                    
+                    <div class="space-y-3">
+                        <template x-if="!botStatus.active_voices || botStatus.active_voices.length === 0">
+                            <div class="text-center text-gray-500 py-4 text-sm">
+                                توني مو موجود بأي روم حالياً.
+                            </div>
+                        </template>
+                        <template x-for="vc in botStatus.active_voices">
+                            <div class="bg-discordDarker rounded-xl p-3 border border-gray-700/50 flex flex-col gap-1">
+                                <span class="font-semibold text-sm text-gray-200" x-text="vc.guild"></span>
+                                <div class="flex items-center gap-2 text-xs text-gray-400">
+                                    <i class="fa-solid fa-volume-high text-discord"></i>
+                                    <span x-text="vc.channel"></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Right Column: Memory Monitor -->
+            <div class="lg:col-span-2 space-y-6">
+                <div class="glass-card rounded-2xl p-6 flex flex-col h-[700px]">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-bold flex items-center gap-2">
+                            <i class="fa-solid fa-brain text-purple-400"></i>
+                            ذاكرة المحادثات الحية (Gemini Context)
+                        </h2>
+                        <button @click="fetchMemory()" class="text-gray-400 hover:text-white transition-colors" title="تحديث يدوي">
+                            <i class="fa-solid fa-rotate-right" :class="{'fa-spin': memoryLoading}"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6">
+                        <template x-if="Object.keys(memory).length === 0">
+                            <div class="flex flex-col items-center justify-center h-full text-gray-500 gap-3">
+                                <i class="fa-solid fa-ghost text-4xl opacity-50"></i>
+                                <p>ما فيه أي سوالف محفوظة بالذاكرة حالياً.</p>
+                            </div>
+                        </template>
+                        
+                        <template x-for="(data, guildId) in memory" :key="guildId">
+                            <div class="bg-discordDarker/50 rounded-xl p-4 border border-gray-700">
+                                <h3 class="text-lg font-bold text-gray-300 mb-3 flex items-center gap-2 border-b border-gray-700 pb-2">
+                                    <i class="fa-solid fa-server text-sm"></i>
+                                    <span x-text="data.name"></span>
+                                </h3>
+                                
+                                <div class="space-y-3">
+                                    <template x-for="(msg, idx) in data.messages" :key="idx">
+                                        <div class="flex flex-col gap-1" :class="msg.role === 'Tony' ? 'items-start' : 'items-end'">
+                                            <span class="text-xs font-semibold px-1" 
+                                                  :class="msg.role === 'Tony' ? 'text-discord' : 'text-green-400'"
+                                                  x-text="msg.role === 'Tony' ? 'توني (Gemini)' : 'عضو (Whisper)'">
+                                            </span>
+                                            <div class="px-4 py-2 rounded-2xl max-w-[85%] text-sm leading-relaxed"
+                                                 :class="msg.role === 'Tony' ? 'bg-discord/20 border border-discord/30 text-gray-200 rounded-tr-none' : 'bg-green-500/10 border border-green-500/20 text-gray-300 rounded-tl-none'">
+                                                <span x-text="msg.text"></span>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
