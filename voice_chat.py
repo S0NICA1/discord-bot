@@ -80,12 +80,13 @@ class StreamingSource(discord.AudioSource):
 class VoiceChatSession:
     """جلسة محادثة صوتية – مبنية على المثال الرسمي من Google."""
 
-    def __init__(self, bot, guild_id, voice_channel, text_channel, requester):
+    def __init__(self, bot, guild_id, voice_channel, text_channel, requester, intervention_target=None):
         self.bot = bot
         self.guild_id = guild_id
         self.voice_channel = voice_channel
         self.text_channel = text_channel
         self.requester = requester
+        self.intervention_target = intervention_target
 
         self.voice_client = None
         self.session = None
@@ -168,6 +169,12 @@ class VoiceChatSession:
                 "psycho": "شخصية غامضة مخيفة. ذباتك هادية بس مرعبة.",
             }
             txt = f"أنت 'مستر ذبات'، {personas.get(persona, personas['troll'])}"
+
+        if self.intervention_target:
+            import time
+            join_time = self.bot.vc_join_times.get(self.intervention_target.id, time.time())
+            mins = int((time.time() - join_time) / 60)
+            txt += f"\n\n[مهمة عاجلة]: أنت دخلت الفويس للتو لتوبيخ ({self.intervention_target.display_name}) لأنه جالس يلعب ومسنتر هنا لأكثر من {mins} دقيقة متواصلة (مدمن ألعاب)! اطلب منه يطلع ويلمس العشب ويهتم بمستقبله، واستلم طقطقة عليه بشكل مباشر."
 
         members = self._get_channel_members()
         txt += (

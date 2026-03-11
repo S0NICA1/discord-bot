@@ -7,6 +7,7 @@ import struct
 import tempfile
 import traceback
 import wave
+import json
 import time
 import random
 from google import genai
@@ -53,6 +54,11 @@ class RoastBot(commands.Bot):
         self.daily_roast_counts  = {}   # {"YYYY-MM-DD": count} – رسم بياني
         self.hourly_vc_activity  = [0]*24  # [عدد الدخلات لكل ساعة] – أوقات الذروة
         self.game_popularity     = {}   # {game_name: play_count} – ألعاب شعبية
+        self.grudge_levels       = {}   # {user_id: score} - نظام الحقد والذاكرة للأعضاء
+        
+        self.data_file = "bot_data.json"
+        self.load_data()
+
         self.protected_users     = set()  # قائمة الحماية
         self.last_roast_time     = None   # آخر ذبة متى
         self.roast_interval_min  = 120    # أدنى فترة (دقائق)
@@ -74,6 +80,36 @@ class RoastBot(commands.Bot):
         self.voice_conversation_memory = {}    # {user_id: [مواضيع]} ذاكرة المحادثات
 
         self._start_time         = time.time()
+
+    # ─── Data Management ──────────────────────────────────────────────────────
+        
+    def load_data(self):
+        try:
+            with open(self.data_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.roast_log = data.get("roast_log", [])[-100:]
+                self.roast_count_per_user = {int(k): v for k, v in data.get("roast_count_per_user", {}).items()}
+                self.daily_roast_counts = data.get("daily_roast_counts", {})
+                self.hourly_vc_activity = data.get("hourly_vc_activity", [0]*24)
+                self.game_popularity = data.get("game_popularity", {})
+                self.grudge_levels = {int(k): v for k, v in data.get("grudge_levels", {}).items()}
+        except Exception:
+            pass
+
+    def save_data(self):
+        try:
+            data = {
+                "roast_log": self.roast_log,
+                "roast_count_per_user": self.roast_count_per_user,
+                "daily_roast_counts": self.daily_roast_counts,
+                "hourly_vc_activity": self.hourly_vc_activity,
+                "game_popularity": self.game_popularity,
+                "grudge_levels": self.grudge_levels
+            }
+            with open(self.data_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Data save error: {e}")
 
     # ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -142,6 +178,9 @@ class RoastBot(commands.Bot):
                 if spk["last_unmute"] > 0:
                     spk["unmuted_sec"] += (time.time() - spk["last_unmute"])
                     spk["last_unmute"] = 0
+            
+        # حفظ البيانات بعد تحديث الإحصائيات المهمة
+        self.save_data()
 
     async def on_presence_update(self, before, after):
         if after.bot:
@@ -153,6 +192,7 @@ class RoastBot(commands.Bot):
                     self.user_game_history[after.id].add(activity.name)
                     # تتبع شعبية الألعاب
                     self.game_popularity[activity.name] = self.game_popularity.get(activity.name, 0) + 1
+                    self.save_data()
 
     # ─── TTS helpers ──────────────────────────────────────────────────────────
 
@@ -399,6 +439,14 @@ class RoastBot(commands.Bot):
         if recent_chat:
             chat_context = "--- آخر السوالف في السيرفر (استخدمها لو تناسب الذبة) ---\n" + "\n".join(recent_chat[-10:]) + "\n----------------------------------------"
 
+        # نظام الحقد
+        grudge_score = self.grudge_levels.get(member.id, 0)
+        grudge_info = ""
+        if grudge_score > 40:
+            grudge_info = f"ملاحظة للمزاج: أنت تحقد حقداً دفيناً على هذا الشخص بشكل مرعب (مستوى الحقد: {grudge_score})! استقصد له وهاجمه بقسوة."
+        elif grudge_score > 10:
+            grudge_info = f"ملاحظة للمزاج: في بينك وبينه عداوة قديمة وتتربص زلاته (مستوى الحقد: {grudge_score})."
+
         prompt = (
             f"أنت تلعب الآن هذا الدور بدقة: [{active_persona}]\n"
             f"مهمتك: ذبة لاذعة جداً، لا تكرر أسلوبك القديم.\n"
@@ -413,6 +461,7 @@ class RoastBot(commands.Bot):
             f"{other_members_info}\n"
             f"----------------------------------------\n"
             f"{chat_context}\n"
+            f"{grudge_info}\n"
             f"تعليمات إجبارية لهذه الذبة: [{focus}]\n"
             "مهم جداً: خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
         )
@@ -436,6 +485,10 @@ class RoastBot(commands.Bot):
             today = datetime.date.today().isoformat()
             self.daily_roast_counts[today] = self.daily_roast_counts.get(today, 0) + 1
             self.last_roast_time = time.time()
+            
+            # زيادة الحقد
+            self.grudge_levels[member.id] = self.grudge_levels.get(member.id, 0) + random.randint(2, 5)
+            self.save_data()
 
             # شغّل الصوت بالفويس
             if member.voice and member.voice.channel:
@@ -498,7 +551,9 @@ class RoastBot(commands.Bot):
             self.roast_log.append((time.time(), member_name, text))
             self.roast_log = self.roast_log[-100:]
             self.roast_count_per_user[member_id] = self.roast_count_per_user.get(member_id, 0) + 1
+            self.grudge_levels[member_id] = self.grudge_levels.get(member_id, 0) + random.randint(1, 4)
             self.last_roast_time = time.time()
+            self.save_data()
             return True
         except Exception as e:
             print(f"Custom roast error: {e}")
@@ -618,41 +673,65 @@ class RoastBot(commands.Bot):
     async def proactive_audio_loop(self):
         if not getattr(self, "voice_proactive_audio", False) or not self.voice_join_allowed:
             return
-        
-        # فرصة 30% كل 10 دقائق عشان ما يكون مزعج جداً
-        if random.random() > 0.3:
-            return
-
-        eligible_vcs = []
+            
+        # ابحث عن مدمني الألعاب (سهرانين أكثر من 4 ساعات)
+        hardcore_gamer = None
+        hardcore_vc = None
         for guild in self.guilds:
-            if guild.id in self.voice_sessions:
-                continue
+            if guild.id in self.voice_sessions: continue
             for vc in guild.voice_channels:
                 if vc.id == AFK_CHANNEL_ID: continue
-                members = [m for m in vc.members if not m.bot and not (m.voice.self_deaf or m.voice.deaf)]
-                if len(members) >= 2:
-                    eligible_vcs.append((guild, vc))
+                for m in vc.members:
+                    if not m.bot and not m.voice.self_deaf and not m.voice.deaf:
+                        join_time = self.vc_join_times.get(m.id, time.time())
+                        mins = int((time.time() - join_time) / 60)
+                        if mins >= 180 and m.activities: # 3 ساعات أو 4 ساعات (نخليها 3 أحسن للضحك)
+                            hardcore_gamer = m
+                            hardcore_vc = vc
+                            break
+                if hardcore_gamer: break
+            if hardcore_gamer: break
 
-        if not eligible_vcs:
+        # فرصة 30% كل 10 دقائق عشان ما يكون مزعج جداً (إلا لو فيه مدمن ألعاب ندش فوراً بنسبة أعلى)
+        if not hardcore_gamer and random.random() > 0.3:
             return
 
-        guild, vc = random.choice(eligible_vcs)
+        target_guild = hardcore_gamer.guild if hardcore_gamer else None
+        target_vc = hardcore_vc
+
+        if not target_vc:
+            eligible_vcs = []
+            for guild in self.guilds:
+                if guild.id in self.voice_sessions:
+                    continue
+                for vc in guild.voice_channels:
+                    if vc.id == AFK_CHANNEL_ID: continue
+                    members = [m for m in vc.members if not m.bot and not (m.voice.self_deaf or m.voice.deaf)]
+                    if len(members) >= 2:
+                        eligible_vcs.append((guild, vc))
+
+            if not eligible_vcs:
+                return
+            target_guild, target_vc = random.choice(eligible_vcs)
+
         try:
             session = VoiceChatSession(
                 bot=self,
-                guild_id=guild.id,
-                voice_channel=vc,
-                text_channel=guild.system_channel or vc,
-                requester=guild.me,
+                guild_id=target_guild.id,
+                voice_channel=target_vc,
+                text_channel=target_guild.system_channel or target_vc,
+                requester=target_guild.me,
             )
             # البوت يراقب بصمت مؤقتاً
-            self.voice_sessions[guild.id] = session
+            self.voice_sessions[target_guild.id] = session
             asyncio.create_task(session.start())
             
-            # ممكن بعدين نرسل رسالة بالشات
-            ch = self.get_channel(MAIN_CHANNEL_ID) or guild.system_channel
+            ch = self.get_channel(MAIN_CHANNEL_ID) or target_guild.system_channel
             if ch:
-                await ch.send("🥷 مستر ذبات دخل الفويس يتسمع عليكم...")
+                if hardcore_gamer:
+                    await ch.send(f"🥷 مستر ذبات متوجه للفويس لأن {hardcore_gamer.display_name} جالس 3+ ساعات متواصلة! لازم يتهزأ ويلمس العشب!")
+                else:
+                    await ch.send("🥷 مستر ذبات دخل الفويس يتسمع عليكم...")
                 
         except Exception as e:
             print(f"Proactive Audio Error: {e}")
@@ -700,7 +779,9 @@ class RoastBot(commands.Bot):
                             self.roast_log.append((time.time(), message.author.display_name, roast_text))
                             self.roast_log = self.roast_log[-100:]
                             self.roast_count_per_user[message.author.id] = self.roast_count_per_user.get(message.author.id, 0) + 1
+                            self.grudge_levels[message.author.id] = self.grudge_levels.get(message.author.id, 0) + random.randint(2, 5)
                             self.last_roast_time = time.time()
+                            self.save_data()
                             
                             # شغّل الصوت بالفويس إذا كان موجود
                             if message.author.voice and message.author.voice.channel:

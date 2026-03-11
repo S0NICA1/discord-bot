@@ -80,13 +80,14 @@ async def handle_stats(request):
             if not m.bot:
                 all_members.append({"id":m.id,"name":m.display_name,"avatar":str(m.display_avatar.url)})
 
-    # لوحة العار
+    # لوحة العار والحقد
     shame = []
     for guild in bot.guilds:
         for uid, cnt in sorted(bot.roast_count_per_user.items(), key=lambda x:-x[1])[:15]:
             m = guild.get_member(uid)
             if m:
-                shame.append({"id":uid,"name":m.display_name,"avatar":str(m.display_avatar.url),"count":cnt})
+                grudge_lvl = getattr(bot, 'grudge_levels', {}).get(uid, 0)
+                shame.append({"id":uid,"name":m.display_name,"avatar":str(m.display_avatar.url),"count":cnt,"grudge":grudge_lvl})
 
     # ألعاب شعبية
     top_games = sorted(bot.game_popularity.items(), key=lambda x:-x[1])[:10]
@@ -650,7 +651,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         <div class="card-body" id="members-list"><div class="empty"><div class="empty-icon">🔇</div>لا أحد</div></div>
       </div>
       <div class="card">
-        <div class="card-head"><h2>🏆 لوحة العار</h2></div>
+        <div class="card-head"><h2>🏆 جدار العار والحقد</h2></div>
         <div class="card-body" id="shame-list"><div class="empty"><div class="empty-icon">😇</div>ما فيه ضحايا بعد</div></div>
       </div>
     </div>
@@ -1100,7 +1101,16 @@ async function loadData(){
     else{sl.innerHTML=D.shame_board.map((s,i)=>{
       const rc=i===0?'gold':i===1?'silver':i===2?'bronze':'';
       const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1);
-      return `<div class="shame-item"><div class="shame-rank ${rc}">${medal}</div><img src="${s.avatar}" style="width:32px;height:32px;border-radius:50%"><span style="font-weight:700;font-size:.85rem">${s.name}</span><span class="shame-count">${s.count} ذبة</span></div>`;
+      const grad = s.grudge > 40 ? '🔥 حقد شديد' : s.grudge > 10 ? '😡 عداوة' : '';
+      return `<div class="shame-item">
+        <div class="shame-rank ${rc}">${medal}</div>
+        <img src="${s.avatar}" style="width:32px;height:32px;border-radius:50%">
+        <div style="display:flex;flex-direction:column;">
+          <span style="font-weight:700;font-size:.85rem">${s.name}</span>
+          <span style="font-size:.65rem;color:var(--accent)">${grad ? grad + ' ('+s.grudge+')' : 'مستوى الحقد: '+s.grudge}</span>
+        </div>
+        <span class="shame-count">${s.count} ذبة</span>
+      </div>`;
     }).join('')}
 
     // Roasts
