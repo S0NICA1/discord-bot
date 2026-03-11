@@ -23,10 +23,16 @@ _speech_queues = {}
 async def speak_text_to_discord(guild_id: int, text: str, voice_client: discord.VoiceClient):
     """Adds Tony's response to a guild queue so he doesn't speak over himself."""
     if guild_id not in _speech_queues:
-        _speech_queues[guild_id] = asyncio.Queue()
+        _speech_queues[guild_id] = asyncio.Queue(maxsize=3)
         # Start the background worker for this guild
         asyncio.create_task(_guild_audio_worker(guild_id, voice_client))
         
+    if _speech_queues[guild_id].full():
+        logger.warning(f"Speech queue for guild {guild_id} is full. Ignoring message to prevent spam.")
+        # If the queue is completely flooded, we drop the new text. 
+        # Optional: Add a voice warning here.
+        return
+
     await _speech_queues[guild_id].put(text)
 
 async def _guild_audio_worker(guild_id: int, voice_client: discord.VoiceClient):

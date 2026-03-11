@@ -1,6 +1,8 @@
 import whisper
 import logging
 import asyncio
+import numpy as np
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -20,14 +22,20 @@ def load_model():
         _model = whisper.load_model(WHISPER_MODEL)
         logger.info("Whisper model loaded successfully.")
 
-def transcribe_audio_sync(file_path: str) -> str:
-    """Sync function to run transcription."""
+def transcribe_audio_sync(audio_input) -> str:
+    """Sync function to run transcription on a numpy array or file path."""
     if _model is None:
         load_model()
     
     try:
         # Forced Arabic transcription to prevent auto-detect failures
-        result = _model.transcribe(file_path, language=WHISPER_LANGUAGE, fp16=False)
+        # initial_prompt guides Whisper to expect Gulf Arabic and the wake word
+        result = _model.transcribe(
+            audio_input, 
+            language=WHISPER_LANGUAGE, 
+            fp16=False,
+            initial_prompt="هذا تسجيل صوتي عفوي باللهجة السعودية الخليجية. يا توني، اسمعني."
+        )
         text = result.get("text", "").strip()
         logger.debug(f"Transcribed Text: {text}")
         return text
@@ -35,22 +43,20 @@ def transcribe_audio_sync(file_path: str) -> str:
         logger.error(f"Whisper Transcription error: {e}")
         return ""
 
-async def transcribe_audio(file_path: str) -> str:
+async def transcribe_audio(audio_input) -> str:
     """Async wrapper around the transcription to prevent blocking the bot."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, transcribe_audio_sync, file_path)
+    return await loop.run_in_executor(_executor, transcribe_audio_sync, audio_input)
 
 def contains_wake_word(text: str) -> bool:
-    """Checks if the transcribed text contains the wake word to activate Tony."""
-    # Remove punctuation for easier matching
+    """Checks if the transcribed text contains the wake word using fuzzy matching."""
     clean_text = ''.join(char for char in text.lower() if char.isalnum() or char.isspace())
     
-    wake_words = ["يا توني", "tony", "توني"]
-    for word in wake_words:
-        # Check if the text starts with or strongly features the wake word
-        # (Whisper might precede it with a small artifact)
-        if word in clean_text:
-            # We want to respond only if they called him
-            return True
-            
+    # Regex for flexible matching:
+    # Matches "يا توني", "ياتوني", "توني", "تونى", "يا... توني", "tony"
+    pattern = r"(يا\s*تون[يى]|تون[يى]|tony)"
+    
+    if re.search(pattern, clean_text):
+        return True
+        
     return False

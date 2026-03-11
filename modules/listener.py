@@ -2,9 +2,10 @@ import logging
 import time
 import discord
 import asyncio
-import os
-import wave
+import numpy as np
+import ffmpeg
 import gc
+import random
 
 from discord.sinks import Sink
 from modules.transcriber import transcribe_audio, contains_wake_word
@@ -23,6 +24,7 @@ class TonyAudioSink(Sink):
         self.vc = voice_client
         self.audio_data = {}  # {user_id: [bytearray_buffer, last_speak_time]}
         self.silence_threshold = 1.5  # seconds of silence to start processing
+        self.user_cooldowns = {} # {user_id: last_processed_time}
         
     def write(self, data, user):
         """Called repeatedly when a user talks."""
@@ -35,6 +37,8 @@ class TonyAudioSink(Sink):
 
     async def _process_loop(self):
         """Continuously checks if a user has stopped talking to process their chunk."""
+        last_radio_time = time.time()
+        
         while True:
             await asyncio.sleep(0.5)
             
@@ -54,53 +58,94 @@ class TonyAudioSink(Sink):
                         
                     # Clear their buffer
                     self.audio_data[user] = [bytearray(), current_time]
+                    last_radio_time = current_time # Reset radio silence
 
             for user, buffer in to_process:
                 # Fire off the transcription asynchronously so it doesn't block the loop
                 asyncio.create_task(self._handle_user_audio(user, buffer))
 
+            # Radio Tony Logic (10% chance to speak every 5 minutes of total silence)
+            if current_time - last_radio_time > 300:
+                last_radio_time = current_time
+                vc_members = [m for m in self.vc.channel.members if not m.bot]
+                
+                if len(vc_members) > 0 and random.random() < 0.10:
+                    logger.info("Triggering Radio Tony break-silence...")
+                    prompt = "الروم هدوء من فترة طويلة، افتح سالفة عشوائية، أو ذب على الهدوء، أو ارمِ نكتة."
+                    guild = self.vc.guild
+                    
+                    async def trigger_radio():
+                        try:
+                            response = generate_response(guild.id, getattr(self.vc, 'user', type('obj', (object,), {'id': 0})).id, "System", prompt, len(vc_members))
+                            await speak_text_to_discord(guild.id, response, self.vc)
+                        except Exception as e:
+                            logger.error(f"Radio Tony failed: {e}")
+                            
+                    asyncio.create_task(trigger_radio())
+
     async def _handle_user_audio(self, user: int, audio_bytes: bytes):
-        """Saves a chunk, transcribes it, and coordinates with brain and speaker."""
+        """Processes a chunk entirely in memory, checks cooldowns, and coordinates with brain/speaker."""
         
-        # Only process if we can find the member object
+        # Spam Protection: Cooldown of 5 seconds per user
+        current_time = time.time()
+        last_processed = self.user_cooldowns.get(user, 0)
+        if current_time - last_processed < 5.0:
+            logger.debug(f"User {user} is on cooldown. Ignoring audio chunk.")
+            return
+            
         guild = self.vc.guild
         member = guild.get_member(user)
         
         if not member or member.bot:
             return
 
-        file_path = f"tmp_audio_{user}_{int(time.time())}.wav"
+        # Count non-bot members sitting in this specific voice channel
+        vc_members_count = len([m for m in self.vc.channel.members if not m.bot])
+        
+        # Detect members who are deafened or muted to let Tony roast them
+        afk_users = [m.display_name for m in self.vc.channel.members if m.voice and (m.voice.self_mute or m.voice.self_deaf) and not m.bot]
+        
+        # Lock the user out for 5 seconds to prevent them spamming Tony while he thinks
+        self.user_cooldowns[user] = current_time
         
         try:
-            # We dump the PCM payload to a WAV file so Whisper can process it easily.
-            with wave.open(file_path, "wb") as wav:
-                wav.setnchannels(2)  # Discord gives us Pycord stereo PCM
-                wav.setsampwidth(2)  # 16-bit
-                wav.setframerate(48000) # Pycord framerate
-                wav.writeframesraw(audio_bytes)
+            logger.info(f"Processing audio for {member.display_name} in-memory ({len(audio_bytes)} bytes)...")
             
-            logger.info(f"Processing audio for {member.display_name} ({len(audio_bytes)} bytes)...")
+            # In-memory conversion from 48kHz Stereo 16-bit PCM to 16kHz Mono Float32 using ffmpeg
+            # This drastically reduces latency by avoiding disk I/O completely
+            out, _ = (
+                ffmpeg
+                .input('pipe:', format='s16le', acodec='pcm_s16le', ac=2, ar='48k')
+                .output('pipe:', format='f32le', acodec='pcm_f32le', ac=1, ar='16k')
+                .run(input=audio_bytes, capture_stdout=True, capture_stderr=True)
+            )
             
-            text = await transcribe_audio(file_path)
+            audio_np = np.frombuffer(out, np.float32)
+            
+            text = await transcribe_audio(audio_np)
+            
+            # Horror Companion: Detect screams
+            rms = np.sqrt(np.mean(audio_np**2)) if len(audio_np) > 0 else 0
+            if rms > 0.35:
+                logger.info("High volume detected (Horror Companion)!")
+                text = f"[المرسل كان يصارخ بصوت عالي جداً أو منفجع] {text}"
             
             if text and contains_wake_word(text):
                 logger.info(f"Wake word detected! Transcription: {text}")
                 
-                response = generate_response(guild.id, member.id, member.display_name, text)
+                response = generate_response(guild.id, member.id, member.display_name, text, vc_members_count, afk_users)
                 logger.info(f"Tony Response: {response}")
                 
                 await speak_text_to_discord(guild.id, response, self.vc)
             else:
                 logger.debug(f"Ignored transcription: {text}")
+                # Reset cooldown if they didn't actually call him, so they can try again quickly
+                self.user_cooldowns[user] = 0 
                 
         except Exception as e:
             logger.error(f"Error handling user audio chunk: {e}")
+            self.user_cooldowns[user] = 0
         finally:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except:
-                pass
             gc.collect()
 
 def start_listening(voice_client: discord.VoiceClient):
