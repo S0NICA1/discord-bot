@@ -7,15 +7,20 @@ from modules.brain import generate_response
 from modules.speaker import speak_text_to_discord
 from modules.web import start_web_server
 
-# Basic logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Basic logging setup — DEBUG for troubleshooting
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("TonyBot")
+# Quiet down noisy loggers
+logging.getLogger("discord").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # Intents configuration required by Pycord
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 intents.guilds = True
+intents.members = True  # Required for guild.get_member() to work
 
 bot = discord.Bot(intents=intents)
 
@@ -34,8 +39,11 @@ async def on_ready():
 @bot.slash_command(name="join", description="Tony joins your current voice channel.")
 async def join(ctx: discord.ApplicationContext):
     
+    # Defer the response immediately so Discord doesn't timeout if connection takes >3 seconds
+    await ctx.defer()
+    
     if not ctx.author.voice or not ctx.author.voice.channel:
-        await ctx.respond(" لازم تكون في روم صوتي عشان أدخل معاك!", ephemeral=True)
+        await ctx.followup.send(" لازم تكون في روم صوتي عشان أدخل معاك!", ephemeral=True)
         return
         
     voice_channel = ctx.author.voice.channel
@@ -43,7 +51,7 @@ async def join(ctx: discord.ApplicationContext):
     # Check if Tony is already in a VC in this guild
     if ctx.voice_client:
         if ctx.voice_client.channel.id == voice_channel.id:
-            await ctx.respond("أنا معك بالروم أصلاً يا ذكي!", ephemeral=True)
+            await ctx.followup.send("أنا معك بالروم أصلاً يا ذكي!", ephemeral=True)
             return
         else:
             await ctx.voice_client.move_to(voice_channel)
@@ -53,10 +61,10 @@ async def join(ctx: discord.ApplicationContext):
             await voice_channel.connect()
         except Exception as e:
             logger.error(f"Failed to connect to voice: {e}")
-            await ctx.respond(f"ما قدرت أدخل الروم: {e}", ephemeral=True)
+            await ctx.followup.send(f"ما قدرت أدخل الروم: {e}", ephemeral=True)
             return
 
-    await ctx.respond(f"دخلت روم **{voice_channel.name}**! نادني بـ (يا توني) أو (Tony) و أنا بالخدمة.")
+    await ctx.followup.send(f"دخلت روم **{voice_channel.name}**! نادني بـ (يا توني) أو (Tony) و أنا بالخدمة.")
     
     # Start the custom audio sink
     if ctx.voice_client:
