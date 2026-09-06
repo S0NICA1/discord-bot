@@ -1,8 +1,8 @@
-FROM python:3.13-slim
+FROM python:3.11-slim
 
-# تثبيت libopus0 (مطلوب لصوت الديسكورد)
+# تثبيت libopus0 و ffmpeg (مطلوب لصوت الديسكورد)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libopus0 && \
+    apt-get install -y --no-install-recommends libopus0 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
