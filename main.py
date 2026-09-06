@@ -177,10 +177,17 @@ class RoastBot(commands.Bot):
             self.daily_report_loop.start()
         if not self.voice_intel_loop.is_running():
             self.voice_intel_loop.start()
+        if not self.roast_loop.is_running():
+            self.roast_loop.start()
         print("Slash commands synced successfully.")
 
     async def on_ready(self):
         print(f"Logged in as {self.user.name} ({self.user.id}) - Mr. Roast 3.0 Ready!")
+        if not self.roast_loop.is_running():
+            try:
+                self.roast_loop.start()
+            except Exception as e:
+                logger.warning(f"Roast loop start warning in on_ready: {e}")
         for guild in self.guilds:
             for vc in getattr(guild, 'voice_channels', []):
                 for member in getattr(vc, 'members', []):
@@ -584,19 +591,42 @@ class RoastBot(commands.Bot):
     def change_interval(self, min_minutes: int, max_minutes: int):
         self.roast_interval_min = max(30, min(min_minutes, 600))
         self.roast_interval_max = max(self.roast_interval_min, min(max_minutes, 720))
+        if hasattr(self, "roast_loop") and self.roast_loop:
+            next_interval = random.randint(self.roast_interval_min, self.roast_interval_max)
+            self.roast_loop.change_interval(minutes=next_interval)
         return self.roast_interval_min, self.roast_interval_max
 
     async def toggle_roast_loop(self):
         if self.roast_loop.is_running():
             self.roast_loop.cancel()
+            while self.roast_loop._task and not self.roast_loop._task.done():
+                await asyncio.sleep(0.01)
             return False
         else:
+            while self.roast_loop._task and not self.roast_loop._task.done():
+                await asyncio.sleep(0.01)
             self.roast_loop.start()
             return True
 
     @tasks.loop(hours=2)
     async def roast_loop(self):
-        await self.force_random_roast()
+        try:
+            next_interval = random.randint(self.roast_interval_min, self.roast_interval_max)
+            self.roast_loop.change_interval(minutes=next_interval)
+            await self.force_random_roast()
+        except Exception as e:
+            logger.error(f"Error during autonomous roast cycle: {e}")
+
+    @roast_loop.before_loop
+    async def before_roast_loop(self):
+        try:
+            await self.wait_until_ready()
+        except Exception:
+            pass
+
+    @roast_loop.error
+    async def on_roast_loop_error(self, error):
+        logger.error(f"roast_loop encountered an unhandled error: {error}")
 
     @tasks.loop(minutes=60)
     async def daily_report_loop(self):

@@ -983,3 +983,40 @@ async def test_route_cli_execute_unknown_command(web_client):
     data = await resp.json()
     assert data["ok"] is False
     assert "COMMAND NOT RECOGNIZED" in data["output"]
+
+
+@pytest.mark.asyncio
+async def test_roast_loop_auto_start_and_toggle(test_bot):
+    """Test roast_loop auto-starts on ready and toggle_roast_loop transitions cleanly."""
+    # Simulate on_ready starting the loop
+    if not test_bot.roast_loop.is_running():
+        test_bot.roast_loop.start()
+    assert test_bot.roast_loop.is_running() is True
+
+    # Toggle off
+    res = await test_bot.toggle_roast_loop()
+    assert res is False
+    assert test_bot.roast_loop.is_running() is False
+
+    # Toggle back on
+    res2 = await test_bot.toggle_roast_loop()
+    assert res2 is True
+    assert test_bot.roast_loop.is_running() is True
+
+    # Clean up
+    if test_bot.roast_loop.is_running():
+        await test_bot.toggle_roast_loop()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_roast_loop_active(web_client, test_bot):
+    """Test GET /api/stats reports roast_loop_running correctly when active."""
+    if not test_bot.roast_loop.is_running():
+        await test_bot.toggle_roast_loop()
+    resp = await web_client.get("/api/stats")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["roast_loop_running"] is True
+    if test_bot.roast_loop.is_running():
+        await test_bot.toggle_roast_loop()
+

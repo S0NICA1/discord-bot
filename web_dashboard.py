@@ -624,8 +624,12 @@ async def handle_cli_execute(request):
             if len(parts) > 1:
                 action = parts[1].lower()
                 if action == "on" and not bot.roast_loop.is_running():
-                    bot.roast_loop.start()
+                    try:
+                        bot.roast_loop.start()
+                    except RuntimeError:
+                        bot.roast_loop.restart()
                 elif action == "off" and bot.roast_loop.is_running():
+                    bot.roast_loop.stop()
                     bot.roast_loop.cancel()
                 return web.Response(text=json.dumps({"ok": True, "output": f"Roast loop state: {bot.roast_loop.is_running()}"}), content_type="application/json")
             return web.Response(text=json.dumps({"ok": False, "output": "USAGE: loop <on|off>"}), content_type="application/json")
