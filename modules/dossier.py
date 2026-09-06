@@ -15,6 +15,10 @@ class DossierManager:
         self.dossiers = {}
         self.load()
 
+    @property
+    def data(self):
+        return self.dossiers
+
     def load(self):
         if os.path.exists(self.filepath):
             try:

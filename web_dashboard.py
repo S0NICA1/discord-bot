@@ -30,178 +30,210 @@ AFK_CHANNEL_ID = 782986605148635166
 
 async def handle_stats(request):
     bot = request.app["bot"]
-    members_in_vc = []
-    total_vc_minutes = 0
-    guild_info = {}
+    try:
+        members_in_vc = []
+        total_vc_minutes = 0
+        guild_info = {}
 
-    for guild in bot.guilds:
-        guild_info = {
-            "name": guild.name,
-            "icon": str(guild.icon.url) if guild.icon else "",
-            "member_count": guild.member_count,
-            "online": sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot),
-        }
-        for vc in guild.voice_channels:
-            if vc.id == AFK_CHANNEL_ID:
-                continue
-            for m in vc.members:
+        for guild in getattr(bot, "guilds", []):
+            guild_info = {
+                "name": guild.name,
+                "icon": str(guild.icon.url) if guild.icon else "",
+                "member_count": guild.member_count,
+                "online": sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot),
+            }
+            for vc in guild.voice_channels:
+                if vc.id == AFK_CHANNEL_ID:
+                    continue
+                for m in vc.members:
+                    if not m.bot:
+                        join_time = bot.vc_join_times.get(m.id, time.time())
+                        mins = int((time.time() - join_time) / 60)
+                        total_vc_minutes += mins
+                        games = list(bot.user_game_history.get(m.id, []))
+                        activities = []
+                        custom_status = ""
+                        for act in m.activities:
+                            if act.type == discord.ActivityType.playing:
+                                activities.append({"type": "playing", "name": act.name})
+                            elif act.type == discord.ActivityType.streaming:
+                                activities.append({"type": "streaming", "name": getattr(act, 'game', act.name)})
+                            elif act.type == discord.ActivityType.listening:
+                                activities.append({"type": "listening", "name": act.name})
+                            elif act.type == discord.ActivityType.custom:
+                                custom_status = getattr(act, 'name', '') or getattr(act, 'state', '') or ''
+
+                        spk = bot.user_speak_history.get(m.id, {"unmuted_sec": 0, "last_unmute": 0})
+                        unmuted_time = spk["unmuted_sec"]
+                        if spk["last_unmute"] > 0:
+                            unmuted_time += (time.time() - spk["last_unmute"])
+
+                        speak_ratio = 0
+                        if mins > 0:
+                            speak_ratio = min(100, int((unmuted_time / (mins * 60)) * 100))
+
+                        u_dossier = bot.dossier_mgr.get_user_dossier(m.id)
+
+                        members_in_vc.append({
+                            "id": m.id,
+                            "name": m.display_name,
+                            "avatar": str(m.display_avatar.url),
+                            "minutes": mins,
+                            "channel": vc.name,
+                            "games": games,
+                            "activities": activities,
+                            "custom_status": custom_status,
+                            "muted": m.voice.self_mute or m.voice.mute if m.voice else False,
+                            "deafened": m.voice.self_deaf or m.voice.deaf if m.voice else False,
+                            "streaming": m.voice.self_stream if m.voice else False,
+                            "status": str(m.status),
+                            "protected": m.id in bot.protected_users,
+                            "speak_ratio": speak_ratio,
+                            "title": u_dossier.get("titles", ["عضو عادي"])[0] if u_dossier.get("titles") else "عضو عادي",
+                            "excuse_count": len(u_dossier.get("excuses", [])),
+                            "crime_count": len(u_dossier.get("crimes", [])),
+                            "grudge": bot.grudge_levels.get(m.id, 0)
+                        })
+
+        all_members = []
+        for guild in getattr(bot, "guilds", []):
+            for m in guild.members:
                 if not m.bot:
-                    join_time = bot.vc_join_times.get(m.id, time.time())
-                    mins = int((time.time() - join_time) / 60)
-                    total_vc_minutes += mins
-                    games = list(bot.user_game_history.get(m.id, []))
-                    activities = []
-                    custom_status = ""
-                    for act in m.activities:
-                        if act.type == discord.ActivityType.playing:
-                            activities.append({"type": "playing", "name": act.name})
-                        elif act.type == discord.ActivityType.streaming:
-                            activities.append({"type": "streaming", "name": getattr(act, 'game', act.name)})
-                        elif act.type == discord.ActivityType.listening:
-                            activities.append({"type": "listening", "name": act.name})
-                        elif act.type == discord.ActivityType.custom:
-                            custom_status = getattr(act, 'name', '') or getattr(act, 'state', '') or ''
-
-                    spk = bot.user_speak_history.get(m.id, {"unmuted_sec": 0, "last_unmute": 0})
-                    unmuted_time = spk["unmuted_sec"]
-                    if spk["last_unmute"] > 0:
-                        unmuted_time += (time.time() - spk["last_unmute"])
-
-                    speak_ratio = 0
-                    if mins > 0:
-                        speak_ratio = min(100, int((unmuted_time / (mins * 60)) * 100))
-
-                    u_dossier = bot.dossier_mgr.get_user_dossier(m.id)
-
-                    members_in_vc.append({
+                    all_members.append({
                         "id": m.id,
                         "name": m.display_name,
                         "avatar": str(m.display_avatar.url),
-                        "minutes": mins,
-                        "channel": vc.name,
-                        "games": games,
-                        "activities": activities,
-                        "custom_status": custom_status,
-                        "muted": m.voice.self_mute or m.voice.mute if m.voice else False,
-                        "deafened": m.voice.self_deaf or m.voice.deaf if m.voice else False,
-                        "streaming": m.voice.self_stream if m.voice else False,
-                        "status": str(m.status),
-                        "protected": m.id in bot.protected_users,
-                        "speak_ratio": speak_ratio,
-                        "title": u_dossier.get("titles", ["عضو عادي"])[0] if u_dossier.get("titles") else "عضو عادي",
-                        "excuse_count": len(u_dossier.get("excuses", [])),
-                        "crime_count": len(u_dossier.get("crimes", [])),
-                        "grudge": bot.grudge_levels.get(m.id, 0)
+                        "status": str(m.status)
                     })
 
-    all_members = []
-    for guild in bot.guilds:
-        for m in guild.members:
-            if not m.bot:
-                all_members.append({
-                    "id": m.id,
-                    "name": m.display_name,
-                    "avatar": str(m.display_avatar.url),
-                    "status": str(m.status)
-                })
+        shame = []
+        for guild in getattr(bot, "guilds", []):
+            for uid, cnt in sorted(bot.roast_count_per_user.items(), key=lambda x: -x[1])[:15]:
+                m = guild.get_member(uid)
+                if m:
+                    grudge_lvl = bot.grudge_levels.get(uid, 0)
+                    u_dos = bot.dossier_mgr.get_user_dossier(uid)
+                    top_excuse = u_dos.get("excuses", ["لا توجد تصريفات"])[0] if u_dos.get("excuses") else "لا توجد"
+                    title = u_dos.get("titles", ["المستهدف"])[0] if u_dos.get("titles") else "المستهدف"
+                    shame.append({
+                        "id": uid,
+                        "name": m.display_name,
+                        "avatar": str(m.display_avatar.url),
+                        "count": cnt,
+                        "grudge": grudge_lvl,
+                        "title": title,
+                        "top_excuse": top_excuse
+                    })
 
-    shame = []
-    for guild in bot.guilds:
-        for uid, cnt in sorted(bot.roast_count_per_user.items(), key=lambda x: -x[1])[:15]:
-            m = guild.get_member(uid)
-            if m:
-                grudge_lvl = bot.grudge_levels.get(uid, 0)
-                u_dos = bot.dossier_mgr.get_user_dossier(uid)
-                top_excuse = u_dos.get("excuses", ["لا توجد تصريفات"])[0] if u_dos.get("excuses") else "لا توجد"
-                title = u_dos.get("titles", ["المستهدف"])[0] if u_dos.get("titles") else "المستهدف"
-                shame.append({
-                    "id": uid,
-                    "name": m.display_name,
-                    "avatar": str(m.display_avatar.url),
-                    "count": cnt,
-                    "grudge": grudge_lvl,
-                    "title": title,
-                    "top_excuse": top_excuse
-                })
+        top_games = sorted(bot.game_popularity.items(), key=lambda x: -x[1])[:10]
+        top_games = [{"name": g, "count": c} for g, c in top_games]
 
-    top_games = sorted(bot.game_popularity.items(), key=lambda x: -x[1])[:10]
-    top_games = [{"name": g, "count": c} for g, c in top_games]
+        import datetime
+        daily = {}
+        for i in range(7):
+            d = (datetime.date.today() - datetime.timedelta(days=6-i)).isoformat()
+            daily[d] = bot.daily_roast_counts.get(d, 0)
 
-    import datetime
-    daily = {}
-    for i in range(7):
-        d = (datetime.date.today() - datetime.timedelta(days=6-i)).isoformat()
-        daily[d] = bot.daily_roast_counts.get(d, 0)
+        recent_roasts = [{"time": r[0], "member": r[1], "roast": r[2]} for r in bot.roast_log[-100:]]
 
-    recent_roasts = [{"time": r[0], "member": r[1], "roast": r[2]} for r in bot.roast_log[-100:]]
+        protected_list = []
+        for guild in getattr(bot, "guilds", []):
+            for uid in bot.protected_users:
+                m = guild.get_member(uid)
+                if m:
+                    protected_list.append({"id": uid, "name": m.display_name, "avatar": str(m.display_avatar.url)})
 
-    protected_list = []
-    for guild in bot.guilds:
-        for uid in bot.protected_users:
-            m = guild.get_member(uid)
-            if m:
-                protected_list.append({"id": uid, "name": m.display_name, "avatar": str(m.display_avatar.url)})
+        next_roast_in = 0
+        if getattr(bot, "roast_loop", None) and bot.roast_loop.is_running() and bot.roast_loop.next_iteration:
+            diff = (bot.roast_loop.next_iteration - discord.utils.utcnow()).total_seconds()
+            next_roast_in = max(0, int(diff / 60))
 
-    next_roast_in = 0
-    if bot.roast_loop.is_running() and bot.roast_loop.next_iteration:
-        diff = (bot.roast_loop.next_iteration - discord.utils.utcnow()).total_seconds()
-        next_roast_in = max(0, int(diff / 60))
+        # AI Alerts
+        alerts = []
+        for m in members_in_vc:
+            if m["minutes"] > 60 and (m.get("deafened", False) or m.get("muted", False)):
+                alerts.append({"type": "warning", "msg": f"🎯 فرصة قصف: {m['name']} صنم ومسوي ميوت/دفن من أكثر من {m['minutes']} دقيقة!"})
+            if m.get("streaming", False) and len(members_in_vc) == 1:
+                alerts.append({"type": "info", "msg": f"📺 بث انفرادي: {m['name']} يبث لنفسه لحاله بالروم بدون جمهور!"})
+            if m.get("grudge", 0) >= 15:
+                alerts.append({"type": "danger", "msg": f"🔥 حقد متراكم: العداد وصل {m['grudge']} على {m['name']}، يحتاج قصف تأديبي!"})
 
-    # AI Alerts
-    alerts = []
-    for m in members_in_vc:
-        if m["minutes"] > 60 and (m.get("deafened", False) or m.get("muted", False)):
-            alerts.append({"type": "warning", "msg": f"🎯 فرصة قصف: {m['name']} صنم ومسوي ميوت/دفن من أكثر من {m['minutes']} دقيقة!"})
-        if m.get("streaming", False) and len(members_in_vc) == 1:
-            alerts.append({"type": "info", "msg": f"📺 بث انفرادي: {m['name']} يبث لنفسه لحاله بالروم بدون جمهور!"})
-        if m.get("grudge", 0) >= 15:
-            alerts.append({"type": "danger", "msg": f"🔥 حقد متراكم: العداد وصل {m['grudge']} على {m['name']}، يحتاج قصف تأديبي!"})
+        # Recent Crimes from Dossiers
+        recent_crimes = []
+        dossiers_map = getattr(bot.dossier_mgr, 'dossiers', getattr(bot.dossier_mgr, 'data', {}))
+        for uid, dos in list(dossiers_map.items())[:20]:
+            for cr in dos.get("crimes", []):
+                recent_crimes.append({"user_id": uid, "crime": cr})
 
-    # Recent Crimes from Dossiers
-    recent_crimes = []
-    for uid, dos in list(bot.dossier_mgr.data.items())[:20]:
-        for cr in dos.get("crimes", []):
-            recent_crimes.append({"user_id": uid, "crime": cr})
+        dialects_data = [
+            {
+                "id": k,
+                "name": v["name"],
+                "region": v["region"],
+                "icon": v["icon"],
+                "badge": v["badge"],
+                "catchphrases": v["catchphrases"],
+                "metrics": v.get("metrics", {"sharpness": 85, "speed": 90, "authenticity": 95, "humor": 90})
+            }
+            for k, v in DIALECTS.items()
+        ]
 
-    dialects_data = [
-        {
-            "id": k,
-            "name": v["name"],
-            "region": v["region"],
-            "icon": v["icon"],
-            "badge": v["badge"],
-            "catchphrases": v["catchphrases"],
-            "metrics": v.get("metrics", {"sharpness": 85, "speed": 90, "authenticity": 95, "humor": 90})
+        data = {
+            "bot_name": bot.user.name if bot.user else "مستر ذبات 3.0",
+            "bot_avatar": str(bot.user.display_avatar.url) if (bot.user and bot.user.display_avatar) else "",
+            "roast_loop_running": bot.roast_loop.is_running() if hasattr(bot, "roast_loop") else False,
+            "members_in_vc": members_in_vc,
+            "all_members": all_members,
+            "recent_roasts": recent_roasts,
+            "guild": guild_info,
+            "total_vc_minutes": total_vc_minutes,
+            "total_roasts": sum(bot.roast_count_per_user.values()),
+            "uptime_minutes": int((time.time() - getattr(bot, "_start_time", time.time())) / 60),
+            "shame_board": shame,
+            "top_games": top_games,
+            "daily_chart": daily,
+            "hourly_activity": getattr(bot, "hourly_vc_activity", [0]*24),
+            "protected": protected_list,
+            "last_roast_time": getattr(bot, "last_roast_time", None),
+            "next_roast_in": next_roast_in,
+            "interval_min": getattr(bot, "roast_interval_min", 120),
+            "interval_max": getattr(bot, "roast_interval_max", 240),
+            "current_dialect": getattr(bot, "current_dialect", "default"),
+            "dialects": dialects_data,
+            "alerts": alerts,
+            "recent_crimes": recent_crimes[-10:]
         }
-        for k, v in DIALECTS.items()
-    ]
-
-    data = {
-        "bot_name": bot.user.name if bot.user else "مستر ذبات 3.0",
-        "bot_avatar": str(bot.user.display_avatar.url) if bot.user else "",
-        "roast_loop_running": bot.roast_loop.is_running(),
-        "members_in_vc": members_in_vc,
-        "all_members": all_members,
-        "recent_roasts": recent_roasts,
-        "guild": guild_info,
-        "total_vc_minutes": total_vc_minutes,
-        "total_roasts": sum(bot.roast_count_per_user.values()),
-        "uptime_minutes": int((time.time() - bot._start_time) / 60),
-        "shame_board": shame,
-        "top_games": top_games,
-        "daily_chart": daily,
-        "hourly_activity": bot.hourly_vc_activity,
-        "protected": protected_list,
-        "last_roast_time": bot.last_roast_time,
-        "next_roast_in": next_roast_in,
-        "interval_min": bot.roast_interval_min,
-        "interval_max": bot.roast_interval_max,
-        "current_dialect": getattr(bot, "current_dialect", "default"),
-        "dialects": dialects_data,
-        "alerts": alerts,
-        "recent_crimes": recent_crimes[-10:]
-    }
-    return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
+        return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        fallback_data = {
+            "error": str(e),
+            "bot_name": "مستر ذبات 3.0",
+            "bot_avatar": "",
+            "roast_loop_running": False,
+            "members_in_vc": [],
+            "all_members": [],
+            "recent_roasts": [],
+            "guild": {},
+            "total_vc_minutes": 0,
+            "total_roasts": 0,
+            "uptime_minutes": 0,
+            "shame_board": [],
+            "top_games": [],
+            "daily_chart": {},
+            "hourly_activity": [0]*24,
+            "protected": [],
+            "last_roast_time": None,
+            "next_roast_in": 0,
+            "interval_min": 120,
+            "interval_max": 240,
+            "current_dialect": "default",
+            "dialects": [],
+            "alerts": [],
+            "recent_crimes": []
+        }
+        return web.Response(text=json.dumps(fallback_data, ensure_ascii=False), content_type="application/json")
 
 
 async def handle_toggle(request):
