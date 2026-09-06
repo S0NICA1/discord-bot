@@ -1,2 +1,4 @@
+# Nixpacks build configuration for Mr. Roast 3.0
+# Pure text and web intelligence platform - no native audio codecs required
 [phases.setup]
-nixPkgs = ["libopus"]
+nixPkgs = []

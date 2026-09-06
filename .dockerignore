@@ -1,0 +1,37 @@
+# ==============================================================================
+# Docker Build Context Exclusion List
+# ==============================================================================
+
+# Virtual Environments (Prevent copying local host binaries into Linux container)
+.venv
+venv
+env
+
+# Version Control & VCS
+.git
+.gitignore
+
+# Teamwork Agent Coordination & Metadata
+.agents
+.gemini
+
+# Python Bytecode & Test Caches
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+
+# Secrets and Local Environment Files
+.env
+.env.*
+!.env.example
+
+# Runtime Persistence & Temporary Atomic Files
+*.json
+*.tmp
+*.log
+
+# Documentation & Scratch Files
+README.md
+ORIGINAL_REQUEST.md
+PROJECT.md

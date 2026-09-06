@@ -1,8 +1,27 @@
+# Secrets and environment configurations
 .env
+.env.local
+
+# Virtual environments
 .venv/
 venv/
+env/
+
+# Python bytecode and test caches
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Runtime data and state stores (Preserve local runtime state from git)
+data/
 data.json
 user_dossiers.json
+bot_data.json
+dossier_vault.json
+*.tmp
+*.bak
+*.log
+
+# Teamwork agent metadata & workspace artifacts
+.agents/

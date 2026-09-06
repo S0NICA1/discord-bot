@@ -1,24 +1,31 @@
-﻿"""
+"""
 main.py - بوت مستر ذبات 3.0 (Roast Lab & The Ambush Engine)
 تركيز 100% على الذبات، المحاكمات، حلبات الـ 1v1، وبطاقات العار البصرية بدون أي تبعيات صوتية.
 """
 import asyncio
 import io
 import json
+import logging
 import os
 import random
+import signal
+import sys
 import time
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 from modules.dialects import DIALECTS, get_dialect_prompt
-from modules.dossier import dossier_mgr
+from modules.state_manager import state_mgr
 from modules.roast_engine import roast_engine
-from web_dashboard import start_web_server
+from modules.ai_service import generate_content_ai
+from modules.court import CourtVoteView
+from web_dashboard import start_web_server, create_web_app
+
+logger = logging.getLogger("mr_roast.core")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 # Load environment variables
 load_dotenv()
@@ -29,33 +36,6 @@ ADMIN_USER_ID   = int(os.getenv("ADMIN_USER_ID", 0))
 MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", 0))
 AFK_CHANNEL_ID  = 782986605148635166  # روم AFK - يتجاهل الأعضاء فيه
 
-# Gemini client
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-flash-latest"
-
-
-async def generate_content_ai(contents, system_instruction=None):
-    """توليد النص باستخدام Gemini Flash مع التفكير العالي وأداة البحث في قوقل وآلية احتياطية."""
-    try:
-        cfg = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            system_instruction=system_instruction,
-        )
-        return await client.aio.models.generate_content(
-            model=MODEL_NAME, contents=contents, config=cfg
-        )
-    except Exception as e:
-        print(f"Generation with search tool failed ({e}), retrying with thinking only...")
-        cfg_fallback = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
-            system_instruction=system_instruction,
-        )
-        return await client.aio.models.generate_content(
-            model=MODEL_NAME, contents=contents, config=cfg_fallback
-        )
-
-
 # Configure Intents
 intents = discord.Intents.default()
 intents.voice_states    = True
@@ -63,66 +43,6 @@ intents.members         = True
 intents.guilds          = True
 intents.presences       = True
 intents.message_content = True
-
-
-class CourtVoteView(discord.ui.View):
-    """أزرار التصويت لمحكمة السيرفر."""
-    def __init__(self, defendant_id: int, defendant_name: str, charge: str, bot_instance):
-        super().__init__(timeout=90)
-        self.defendant_id = defendant_id
-        self.defendant_name = defendant_name
-        self.charge = charge
-        self.bot = bot_instance
-        self.guilty_votes = set()
-        self.innocent_votes = set()
-
-    @discord.ui.button(label="🔨 مذنب ويستحق الجلد (0)", style=discord.ButtonStyle.danger, custom_id="vote_guilty")
-    async def vote_guilty(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = interaction.user.id
-        self.innocent_votes.discard(uid)
-        self.guilty_votes.add(uid)
-        button.label = f"🔨 مذنب ويستحق الجلد ({len(self.guilty_votes)})"
-        # تحديث الزر الثاني
-        for child in self.children:
-            if child.custom_id == "vote_innocent":
-                child.label = f"🕊️ بريء ومظلوم ({len(self.innocent_votes)})"
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="🕊️ بريء ومظلوم (0)", style=discord.ButtonStyle.secondary, custom_id="vote_innocent")
-    async def vote_innocent(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = interaction.user.id
-        self.guilty_votes.discard(uid)
-        self.innocent_votes.add(uid)
-        button.label = f"🕊️ بريء ومظلوم ({len(self.innocent_votes)})"
-        for child in self.children:
-            if child.custom_id == "vote_guilty":
-                child.label = f"🔨 مذنب ويستحق الجلد ({len(self.guilty_votes)})"
-        await interaction.response.edit_message(view=self)
-
-    async def on_timeout(self):
-        # انتهاء وقت التصويت وإعلان الحكم
-        guilty_count = len(self.guilty_votes)
-        innocent_count = len(self.innocent_votes)
-        
-        target_channel = self.bot.get_channel(MAIN_CHANNEL_ID)
-        if not target_channel and self.bot.guilds:
-            target_channel = self.bot.guilds[0].system_channel
-
-        if guilty_count >= innocent_count:
-            # تنفيذ الحكم
-            dossier_mgr.add_crime(self.defendant_id, self.charge)
-            verdict_msg = f"⚖️ **نطق بالحكم الرسمي:** بأغلبية {guilty_count} صوت مقابل {innocent_count}... ثبتت إدانة المتهم <@{self.defendant_id}> بالتهمة المنسوبة إليه!\n🔥 العقوبة: الجلد الساخر الفوري وإدراج الجريمة في ملف سوابقه الجنائية!"
-            if target_channel:
-                await target_channel.send(verdict_msg)
-                # إطلاق ذبة الحكم
-                for g in self.bot.guilds:
-                    m = g.get_member(self.defendant_id)
-                    if m:
-                        await self.bot.generate_roast_for_member(m, target_channel, custom_topic=f"حكم إدانة من المحكمة بتهمة {self.charge}", custom_intensity=5)
-                        break
-        else:
-            if target_channel:
-                await target_channel.send(f"🕊️ **حكم المحكمة:** تم تبرئة <@{self.defendant_id}> بأغلبية أصوات المحلفين ({innocent_count} صوت)! لكن عيون مستر ذبات لا تغفل عنك...")
 
 
 class RoastBot(commands.Bot):
@@ -140,7 +60,8 @@ class RoastBot(commands.Bot):
         self.game_popularity      = {}   # {game_name: play_count}
         self.grudge_levels        = {}   # {user_id: score}
 
-        self.data_file            = "bot_data.json"
+        self.state_mgr            = state_mgr
+        self.dossier_mgr          = state_mgr
         self.load_data()
 
         self.protected_users      = set()
@@ -150,7 +71,6 @@ class RoastBot(commands.Bot):
         self.current_persona      = "troll"
         self.current_persona_custom = None
         self.current_dialect      = "default"
-        self.dossier_mgr          = dossier_mgr
         self.roast_engine         = roast_engine
         self.server_memory        = {}
         self.user_speak_history   = {}
@@ -158,34 +78,30 @@ class RoastBot(commands.Bot):
 
     def load_data(self):
         try:
-            if os.path.exists(self.data_file):
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.roast_log = data.get("roast_log", [])[-100:]
-                    self.roast_count_per_user = {int(k): v for k, v in data.get("roast_count_per_user", {}).items()}
-                    self.daily_roast_counts = data.get("daily_roast_counts", {})
-                    self.hourly_vc_activity = data.get("hourly_vc_activity", [0]*24)
-                    self.game_popularity = data.get("game_popularity", {})
-                    self.grudge_levels = {int(k): v for k, v in data.get("grudge_levels", {}).items()}
-                    self.current_dialect = data.get("current_dialect", "default")
+            m = self.state_mgr.metrics
+            self.roast_log = m.get("roast_log", [])[-100:]
+            self.roast_count_per_user = {int(k): v for k, v in m.get("roast_count_per_user", {}).items() if str(k).isdigit()}
+            self.daily_roast_counts = m.get("daily_roast_counts", {})
+            self.hourly_vc_activity = m.get("hourly_vc_activity", [0]*24)
+            self.game_popularity = m.get("game_popularity", {})
+            self.grudge_levels = {int(k): v for k, v in m.get("grudge_levels", {}).items() if str(k).isdigit()}
+            self.current_dialect = m.get("current_dialect", "default")
         except Exception as e:
-            print(f"Data load error: {e}")
+            logger.error(f"Data load error: {e}")
 
     def save_data(self):
         try:
-            data = {
-                "roast_log": self.roast_log,
-                "roast_count_per_user": self.roast_count_per_user,
-                "daily_roast_counts": self.daily_roast_counts,
-                "hourly_vc_activity": self.hourly_vc_activity,
-                "game_popularity": self.game_popularity,
-                "grudge_levels": self.grudge_levels,
-                "current_dialect": self.current_dialect
-            }
-            with open(self.data_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            m = self.state_mgr.metrics
+            m["roast_log"] = self.roast_log[-100:]
+            m["roast_count_per_user"] = {str(k): v for k, v in self.roast_count_per_user.items()}
+            m["daily_roast_counts"] = self.daily_roast_counts
+            m["hourly_vc_activity"] = self.hourly_vc_activity
+            m["game_popularity"] = self.game_popularity
+            m["grudge_levels"] = {str(k): v for k, v in self.grudge_levels.items()}
+            m["current_dialect"] = self.current_dialect
+            self.state_mgr._sync_save_state_atomic()
         except Exception as e:
-            print(f"Data save error: {e}")
+            logger.error(f"Data save error: {e}")
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -651,15 +567,128 @@ async def cmd_dialect(interaction: discord.Interaction, dialect: app_commands.Ch
     await interaction.response.send_message(f"✅ تم تحويل لهجة مستر ذبات الرسمية إلى: **{d_name}** 🗣️")
 
 
-# ─── Main Startup ─────────────────────────────────────────────────────────────
+# ─── Decoupled Lifecycle & Supervisor ─────────────────────────────────────────
+
+async def run_discord_bot(bot_instance, token: str, shutdown_event: asyncio.Event):
+    """
+    Supervised Discord bot runner with automatic reconnection,
+    exponential backoff, and shielded exception handling.
+    Keeps the Discord client lifecycle isolated from the web server.
+    """
+    if not token:
+        logger.warning("DISCORD_TOKEN is missing. Bot disabled; running in Web Command Center degraded mode.")
+        return
+
+    reconnect_delay = 5
+    max_reconnect_delay = 60
+
+    while not shutdown_event.is_set():
+        try:
+            logger.info("Initiating connection to Discord Gateway...")
+            await bot_instance.start(token)
+            # Normal shutdown if start returns cleanly
+            break
+        except discord.errors.LoginFailure as e:
+            logger.critical(f"Fatal Discord login failure (invalid token): {e}. Bot disabled; web server remains active.")
+            break
+        except (discord.errors.PrivilegedIntentsRequired, discord.errors.GatewayNotFound) as e:
+            logger.critical(f"Fatal Discord gateway/intent configuration error: {e}. Bot disabled; web server remains active.")
+            break
+        except (discord.DiscordException, aiohttp.ClientError, asyncio.TimeoutError, ConnectionError, OSError) as e:
+            if shutdown_event.is_set():
+                break
+            logger.warning(f"Discord connection dropped ({type(e).__name__}: {e}). Reconnecting in {reconnect_delay}s...")
+            try:
+                await bot_instance.close()
+            except Exception:
+                pass
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+        except asyncio.CancelledError:
+            logger.info("Discord bot task cancelled.")
+            break
+        except Exception as e:
+            if shutdown_event.is_set():
+                break
+            logger.error(f"Unexpected exception in Discord bot task: {e}. Retrying in {reconnect_delay}s...", exc_info=True)
+            try:
+                await bot_instance.close()
+            except Exception:
+                pass
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
+
+async def main():
+    """
+    Primary decoupled application entry point.
+    Guarantees web server availability regardless of Discord Gateway status.
+    """
+    shutdown_event = asyncio.Event()
+
+    # 1. Setup OS Signal Handlers (SIGINT / SIGTERM)
+    loop = asyncio.get_running_loop()
+    def _signal_handler():
+        logger.info("Shutdown signal received. Initiating graceful shutdown...")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except (NotImplementedError, AttributeError):
+            try:
+                signal.signal(sig, lambda s, f: _signal_handler())
+            except Exception:
+                pass
+
+    # 2. Launch Web Server (Resilient Background Server)
+    runner, site, bound_port = await start_web_server(bot)
+    if bound_port:
+        logger.info(f"Web Command Center active on port {bound_port} (Health routes: /health, /api/health)")
+    else:
+        logger.warning("Web server failed to bind; running in headless mode.")
+
+    # 3. Launch Discord Bot Supervisor Task
+    bot_task = asyncio.create_task(
+        run_discord_bot(bot, DISCORD_TOKEN, shutdown_event),
+        name="DiscordBotSupervisor"
+    )
+
+    # 4. Await Shutdown Signal
+    try:
+        await shutdown_event.wait()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Manual termination requested.")
+    finally:
+        logger.info("Commencing graceful teardown sequence...")
+
+        # Cancel and close bot
+        if not bot_task.done():
+            bot_task.cancel()
+            try:
+                await asyncio.wait_for(bot_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
+        if not bot.is_closed():
+            try:
+                await asyncio.wait_for(bot.close(), timeout=5.0)
+            except Exception as e:
+                logger.warning(f"Error closing Discord bot: {e}")
+
+        # Cleanup web server
+        if runner:
+            try:
+                await asyncio.wait_for(runner.cleanup(), timeout=5.0)
+                logger.info("Web server runner cleaned up successfully.")
+            except Exception as e:
+                logger.warning(f"Error cleaning up web runner: {e}")
+
+        logger.info("Mr. Roast 3.0 shutdown complete.")
+
 
 if __name__ == "__main__":
-    if not DISCORD_TOKEN or not GEMINI_API_KEY:
-        print("Please set your DISCORD_TOKEN and GEMINI_API_KEY in the .env file")
-    else:
-        async def main():
-            await asyncio.gather(
-                start_web_server(bot),
-                bot.start(DISCORD_TOKEN)
-            )
+    try:
         asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

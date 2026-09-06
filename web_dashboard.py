@@ -13,6 +13,7 @@ web_dashboard.py - لوحة تحكم مستر ذبات 3.0 (Quantum Cyber Deck)
 import asyncio
 import io
 import json
+import logging
 import os
 import random
 import time
@@ -23,6 +24,11 @@ from google.genai import types
 from modules.dialects import DIALECTS, get_dialect_prompt, get_comparative_prompt
 from modules.dossier import dossier_mgr
 from modules.roast_engine import roast_engine
+from modules.ai_service import generate_content_ai
+from modules.court import CourtVoteView
+from modules.state_manager import state_mgr
+
+logger = logging.getLogger("mr_roast.web")
 
 AFK_CHANNEL_ID = 782986605148635166
 
@@ -394,7 +400,6 @@ async def handle_shame_card(request):
         card_data = bot.dossier_mgr.get_shame_card_data(mid, name, avatar)
 
         # توليد الذبة السريعة
-        from main import generate_content_ai
         roast_prompt = f"أنت مستر ذبات. اكتب ذبة لبطاقة العار الرسمية للعضو '{name}' عن جريمته '{card_data.get('crime')}'. سطر واحد فقط قوي جداً بلهجة {dialect}."
         try:
             resp = await generate_content_ai(contents=roast_prompt)
@@ -437,7 +442,6 @@ async def handle_shame_card_send(request):
 
         card_data = bot.dossier_mgr.get_shame_card_data(mid, member.display_name, str(member.display_avatar.url))
 
-        from main import generate_content_ai
         roast_prompt = f"أنت مستر ذبات. اكتب ذبة لبطاقة العار الرسمية للعضو '{member.display_name}' عن جريمته '{card_data.get('crime')}'. سطر واحد فقط قوي جداً بلهجة {dialect}."
         try:
             resp = await generate_content_ai(contents=roast_prompt)
@@ -492,7 +496,6 @@ async def handle_court_start(request):
         if not target_ch:
             return web.Response(text=json.dumps({"ok": False, "error": "لم يتم العثور على روم المحاكمة"}), content_type="application/json")
 
-        from main import CourtVoteView
         embed = discord.Embed(
             title=f"⚖️ {indictment.get('title', 'محكمة السيرفر العليا')}",
             description=f"**المتهم في قفص الاتهام:** {member.mention}\n**التهمة المنسوبة إليه:** {charge}\n\n📜 **لائحة الادعاء:**\n{indictment.get('indictment', '')}\n\n⚖️ **العقوبة المقترحة:**\n{indictment.get('penalty', '')}",
@@ -537,7 +540,6 @@ async def handle_dialect_preview(request):
         topic = body.get("topic", "واحد سحب علينا بالرانك وجاء اليوم الثاني كأنه ما صار شيء").strip()
         member_name = body.get("member_name", "العضو المستهدف").strip()
 
-        from main import generate_content_ai
         prompt = get_comparative_prompt(topic, member_name)
         resp = await generate_content_ai(contents=prompt)
         text = resp.text.replace('```json', '').replace('```', '').strip()
@@ -551,7 +553,6 @@ async def handle_ai_report(request):
     """توليد تقرير الاستخبارات الساخر للمجلس."""
     bot = request.app["bot"]
     try:
-        from main import generate_content_ai
         stats = f"Online users in VC: {sum(len(vc.members) for g in bot.guilds for vc in g.voice_channels)}\n"
         stats += f"Total roasts: {sum(bot.roast_count_per_user.values())}\n"
         shame = sorted(bot.roast_count_per_user.items(), key=lambda x: -x[1])[:3]
@@ -2857,9 +2858,53 @@ async def handle_index(request):
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
 
+async def handle_health(request):
+    """
+    Health check endpoint for Render, Docker, and monitoring probes.
+    Guaranteed to return HTTP 200 with status telemetry.
+    Reports degraded status when Discord is offline without failing the probe.
+    """
+    bot = request.app.get("bot")
+    start_time = request.app.get("start_time", time.time())
+
+    uptime_seconds = round(float(time.time() - start_time), 2)
+
+    # Check Discord readiness safely
+    discord_ready = False
+    if bot is not None:
+        is_ready_fn = getattr(bot, "is_ready", None)
+        if callable(is_ready_fn):
+            try:
+                discord_ready = bool(is_ready_fn())
+            except Exception:
+                discord_ready = False
+
+    # Status reporting:
+    # "healthy" when Discord bot is connected and ready.
+    # "degraded" when Discord is connecting, failed, or disabled (token missing).
+    # Note: HTTP status code is ALWAYS 200 to keep cloud container routing active.
+    status = "healthy" if discord_ready else "degraded"
+
+    payload = {
+        "status": status,
+        "service": "mr-roast",
+        "version": "3.0",
+        "discord_ready": discord_ready,
+        "uptime": uptime_seconds
+    }
+
+    return web.json_response(payload, status=200)
+
+
 def create_web_app(bot_instance) -> web.Application:
     app = web.Application()
     app["bot"] = bot_instance
+    app["start_time"] = time.time()
+
+    # Register Health Check Routes FIRST
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/health", handle_health)
+
     app.router.add_get("/",                     handle_index)
     app.router.add_get("/api/stats",            handle_stats)
     app.router.add_post("/api/toggle",          handle_toggle)
@@ -2882,12 +2927,63 @@ def create_web_app(bot_instance) -> web.Application:
     return app
 
 
-async def start_web_server(bot_instance):
-    bot_instance._start_time = time.time()
-    port = int(os.environ.get("PORT", 8080))
+async def start_web_server(bot_instance, host: str = "0.0.0.0", port: int = None, max_fallback_attempts: int = 5):
+    """
+    Starts the aiohttp web server with resilient port binding,
+    automatic port conflict fallback (in local dev), and safe lifecycle tracking.
+
+    Returns:
+        tuple[web.AppRunner, web.TCPSite, int]: (runner, site, bound_port) or (runner, None, None) on failure
+    """
+    start_time = time.time()
+    if bot_instance is not None:
+        try:
+            bot_instance._start_time = start_time
+        except Exception:
+            pass
+
+    if port is None:
+        raw_port = os.environ.get("PORT", "8080")
+        try:
+            port = int(raw_port)
+        except ValueError:
+            logger.warning(f"Invalid PORT environment variable '{raw_port}'. Falling back to 8080.")
+            port = 8080
+
     app = create_web_app(bot_instance)
+    app["start_time"] = start_time
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Mr. Roast OS 3.0 Web Dashboard running on port {port}")
+
+    is_cloud_env = "RENDER" in os.environ or "DYNO" in os.environ
+    attempts = 1 if is_cloud_env else max_fallback_attempts
+
+    bound_port = None
+    site = None
+
+    for attempt in range(attempts):
+        candidate_port = port + attempt
+        try:
+            site = web.TCPSite(runner, host, candidate_port, reuse_address=True)
+            await site.start()
+            bound_port = candidate_port
+            logger.info(f"Mr. Roast OS 3.0 Web Dashboard active on http://{host}:{bound_port}")
+            print(f"Mr. Roast OS 3.0 Web Dashboard running on port {bound_port}")
+            break
+        except OSError as e:
+            logger.warning(f"Port {candidate_port} is currently unavailable ({e}).")
+            if attempt < attempts - 1:
+                logger.info(f"Attempting fallback port {candidate_port + 1}...")
+            else:
+                logger.error(f"Could not bind to any port after {attempts} attempts.")
+                if is_cloud_env:
+                    logger.critical(f"FATAL: Render requires binding to designated PORT={port}. Check for process conflicts.")
+                    await runner.cleanup()
+                    raise
+
+    if bound_port is None:
+        logger.error("Web dashboard failed to start. Bot operating in headless mode.")
+        await runner.cleanup()
+        return runner, None, None
+
+    return runner, site, bound_port
