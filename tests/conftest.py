@@ -314,13 +314,20 @@ def test_bot(tmp_path, isolated_dossier_vault):
     RoastBot.user = property(lambda self: getattr(self, "_mock_user", None))
 
     bot = main.bot
+    main.state_mgr = isolated_dossier_vault
     main.dossier_mgr = isolated_dossier_vault
     import modules.court
     modules.court.state_mgr = isolated_dossier_vault
     import modules.state_manager
     modules.state_manager.state_mgr = isolated_dossier_vault
     bot.data_file = str(tmp_path / "bot_data_test.json")
+    bot.state_mgr = isolated_dossier_vault
     bot.dossier_mgr = isolated_dossier_vault
+    bot.voice_telemetry = {}
+    bot.last_infraction_log = {}
+    bot.vc_join_times = {}
+    bot.user_game_history = {}
+    bot.daily_stats = {}
     bot.roast_log = []
     bot.roast_count_per_user = {}
     bot.daily_roast_counts = {}

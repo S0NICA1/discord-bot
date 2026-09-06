@@ -17,8 +17,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-from modules.dialects import DIALECTS, get_dialect_prompt
-from modules.state_manager import state_mgr
+from modules.dialects import (
+    DIALECTS,
+    get_dialect_prompt,
+    format_anti_repetition_prompt,
+    dialect_engine,
+)
+from modules.state_manager import state_mgr, GRUDGE_TITLES
 from modules.roast_engine import roast_engine
 from modules.ai_service import generate_content_ai
 from modules.court import CourtVoteView
@@ -44,6 +49,67 @@ intents.guilds          = True
 intents.presences       = True
 intents.message_content = True
 
+# Contradiction taxonomy constants
+STUDY_KEYWORDS = [
+    "مذاكرة", "ذاكر", "بذاكر", "study", "studying", "فاينل", "اختبار",
+    "امتحان", "جامعة", "واجب", "بحوث", "coding", "كود", "مشروع", "دوام", "شغل", "work"
+]
+
+SLEEP_KEYWORDS = [
+    "نايم", "نوم", "بنام", "سليب", "sleep", "sleeping", "asleep", "zz", "zzz"
+]
+
+BUSY_KEYWORDS = [
+    "مشغول", "busy", "dnd", "لا تكلمني", "حد يكلمني", "do not disturb", "away"
+]
+
+
+def detect_presence_contradictions(member: discord.Member, in_voice: bool, voice_session: dict = None) -> list[tuple[str, str]]:
+    """
+    Analyzes member activities and returns a list of (crime_type, detail_string).
+    """
+    contradictions = []
+    custom_status = ""
+    active_games = []
+
+    for act in getattr(member, 'activities', []):
+        if getattr(act, 'type', None) == discord.ActivityType.custom:
+            custom_status = getattr(act, 'state', '') or getattr(act, 'name', '') or ''
+        elif getattr(act, 'type', None) == discord.ActivityType.playing:
+            active_games.append(getattr(act, 'name', ''))
+
+    low_status = custom_status.lower()
+
+    # 1. Study/Work vs Gaming Fraud
+    if any(k in low_status for k in STUDY_KEYWORDS) and active_games:
+        game_str = ", ".join(active_games)
+        detail = f"كاتب في حالته '{custom_status}' وقاعد يجلد في {game_str}!"
+        contradictions.append(("STATUS_FRAUD", detail))
+
+    # 2. Sleep vs Active Voice / Gaming Fraud
+    if any(k in low_status for k in SLEEP_KEYWORDS):
+        if in_voice:
+            vc_name = voice_session.get("channel_name", "الفويس") if voice_session else "الفويس"
+            detail = f"كاتب في حالته '{custom_status}' وهو مسهر ومسنتر في روم {vc_name}!"
+            contradictions.append(("STATUS_FRAUD", detail))
+        elif active_games:
+            game_str = ", ".join(active_games)
+            detail = f"كاتب في حالته '{custom_status}' وهو صاحي يلعب {game_str}!"
+            contradictions.append(("STATUS_FRAUD", detail))
+
+    # 3. Offline / Busy Invisibility Fraud
+    is_dnd_or_busy = (getattr(member, 'status', None) == discord.Status.dnd) or any(k in low_status for k in BUSY_KEYWORDS)
+    is_invisible = (getattr(member, 'status', None) == discord.Status.offline)
+
+    if (is_dnd_or_busy or is_invisible) and in_voice and voice_session:
+        is_muted = voice_session.get("is_muted", True)
+        if not is_muted:
+            status_label = "أوفلاين ومختفي" if is_invisible else "مشغول (DND)"
+            detail = f"مسوي وضعه '{status_label}' وكاتب '{custom_status or 'مشغول'}' وماسك خط سوالف بالمايك في الفويس!"
+            contradictions.append(("STATUS_FRAUD", detail))
+
+    return contradictions
+
 
 class RoastBot(commands.Bot):
     def __init__(self):
@@ -53,6 +119,8 @@ class RoastBot(commands.Bot):
         self.user_game_history    = {}   # {user_id: set of game names}
         self.daily_stats          = {}   # {user_id: total_minutes_today}
         self.roast_log            = []   # [(timestamp, member_name, roast_text)]
+        self.voice_telemetry      = {}   # {user_id: telemetry_dict}
+        self.last_infraction_log  = {}   # {(user_id, crime_type): timestamp}
 
         self.roast_count_per_user = {}  # {user_id: count}
         self.daily_roast_counts   = {}   # {"YYYY-MM-DD": count}
@@ -105,63 +173,216 @@ class RoastBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        self.daily_report_loop.start()
+        if not self.daily_report_loop.is_running():
+            self.daily_report_loop.start()
+        if not self.voice_intel_loop.is_running():
+            self.voice_intel_loop.start()
         print("Slash commands synced successfully.")
 
     async def on_ready(self):
         print(f"Logged in as {self.user.name} ({self.user.id}) - Mr. Roast 3.0 Ready!")
         for guild in self.guilds:
-            for vc in guild.voice_channels:
-                for member in vc.members:
+            for vc in getattr(guild, 'voice_channels', []):
+                for member in getattr(vc, 'members', []):
                     if not member.bot:
-                        self.vc_join_times[member.id] = time.time() - 1800
+                        now = time.time()
+                        self.vc_join_times[member.id] = now - 1800
+                        is_muted = getattr(member.voice, 'self_mute', False) or getattr(member.voice, 'mute', False) if member.voice else False
+                        is_deaf = getattr(member.voice, 'self_deaf', False) or getattr(member.voice, 'deaf', False) if member.voice else False
+                        self.voice_telemetry[member.id] = {
+                            "channel_id": getattr(vc, 'id', 0),
+                            "channel_name": getattr(vc, 'name', 'الفويس'),
+                            "join_time": now - 1800,
+                            "is_muted": is_muted,
+                            "is_deafened": is_deaf,
+                            "is_streaming": getattr(member.voice, 'self_stream', False) if member.voice else False,
+                            "mute_start": now - 1800 if is_muted else None,
+                            "deafen_start": now - 1800 if is_deaf else None,
+                            "last_unmute_start": now - 1800 if not is_muted else None,
+                            "total_unmuted_seconds": 0.0,
+                            "last_spoke_time": now - 1800 if not is_muted else 0.0,
+                            "afk_deafened_flagged": False
+                        }
 
     # ─── Presence & Activity Tracking ─────────────────────────────────────────
 
     async def on_voice_state_update(self, member, before, after):
-        if member.bot:
+        if getattr(member, 'bot', False):
             return
+
+        now = time.time()
+        user_id = member.id
+
+        # 1. Member Joined VC
         if before.channel is None and after.channel is not None:
-            if after.channel.id == AFK_CHANNEL_ID:
+            if getattr(after.channel, 'id', None) == AFK_CHANNEL_ID:
                 return
-            self.vc_join_times[member.id] = time.time()
-            self.user_game_history[member.id] = set()
+
+            is_muted = getattr(after, 'self_mute', False) or getattr(after, 'mute', False)
+            is_deaf = getattr(after, 'self_deaf', False) or getattr(after, 'deaf', False)
+            is_streaming = getattr(after, 'self_stream', False)
+
+            self.vc_join_times[user_id] = now
+            self.user_game_history[user_id] = set()
             saudi_hour = (time.gmtime().tm_hour + 3) % 24
             self.hourly_vc_activity[saudi_hour] += 1
-            self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": 0}
+            self.user_speak_history[user_id] = {
+                "unmuted_sec": 0,
+                "last_unmute": now if not is_muted else 0
+            }
 
+            self.voice_telemetry[user_id] = {
+                "channel_id": getattr(after.channel, 'id', 0),
+                "channel_name": getattr(after.channel, 'name', 'الفويس'),
+                "join_time": now,
+                "is_muted": is_muted,
+                "is_deafened": is_deaf,
+                "is_streaming": is_streaming,
+                "mute_start": now if is_muted else None,
+                "deafen_start": now if is_deaf else None,
+                "last_unmute_start": now if not is_muted else None,
+                "total_unmuted_seconds": 0.0,
+                "last_spoke_time": now if not is_muted else 0.0,
+                "afk_deafened_flagged": False
+            }
+
+        # 2. Member Left VC
         elif before.channel is not None and after.channel is None:
-            join_time = self.vc_join_times.pop(member.id, None)
-            self.user_speak_history.pop(member.id, None)
-            self.user_game_history.pop(member.id, None)
-            if join_time:
-                mins = int((time.time() - join_time) / 60)
-                self.daily_stats[member.id] = self.daily_stats.get(member.id, 0) + mins
+            join_time = self.vc_join_times.pop(user_id, None)
+            spk = self.user_speak_history.pop(user_id, None)
+            self.user_game_history.pop(user_id, None)
+            session = self.voice_telemetry.pop(user_id, None)
 
-        # تتبع الميوت والسكوت
-        if before.channel == after.channel and before.channel is not None:
-            spk = self.user_speak_history.setdefault(member.id, {"unmuted_sec": 0, "last_unmute": 0})
+            mins = int((now - join_time) / 60) if join_time else 0
+            if mins > 0:
+                self.daily_stats[user_id] = self.daily_stats.get(user_id, 0) + mins
+
+            # Persist cumulative voice metrics into permanent StateManager dossier
+            try:
+                dossier = await self.state_mgr.get_dossier(user_id)
+                v_stats = dossier.get("voice_stats", {
+                    "total_vc_minutes": 0,
+                    "total_unmuted_seconds": 0,
+                    "mute_toggle_count": 0,
+                    "choke_count": 0,
+                    "last_seen_vc": 0.0
+                })
+                v_stats["total_vc_minutes"] += mins
+                if session:
+                    v_stats["total_unmuted_seconds"] += int(session.get("total_unmuted_seconds", 0))
+                v_stats["last_seen_vc"] = now
+                await self.state_mgr.update_dossier(user_id, {"voice_stats": v_stats})
+            except Exception as ex:
+                logger.error(f"Error persisting voice stats for {user_id}: {ex}")
+
+            # DETECT RAGE_QUIT
+            # Trigger A: Roasted within last 180 seconds
+            is_recent_roast_target = (
+                self.last_roasted_user == user_id and
+                self.last_roast_time is not None and
+                (now - self.last_roast_time) <= 180
+            )
+            # Trigger B: Disconnected mid-sentence during active voice discussion
+            last_spoke = session.get("last_spoke_time", 0) if session else 0
+            was_speaking_recently = (now - last_spoke) <= 30 and (mins >= 2)
+            raw_members = getattr(before.channel, 'members', [])
+            other_members = [m for m in raw_members if getattr(m, 'id', None) != member.id] if isinstance(raw_members, (list, tuple, set)) else []
+            other_members_present = len(other_members) >= 1
+
+            channel_name = getattr(before.channel, 'name', 'الفويس')
+            if is_recent_roast_target:
+                elapsed = int(now - self.last_roast_time)
+                detail = f"انحاش وفصل من الفويس بعد قصف جبهته بـ {elapsed} ثانية فقط!"
+                await self.state_mgr.add_infraction(user_id, "RAGE_QUIT", detail)
+                logger.info(f"RAGE_QUIT logged for {member.display_name}: {detail}")
+            elif was_speaking_recently and other_members_present:
+                detail = f"فصل المايك وخرج فجأة بنص السالفة في روم '{channel_name}'!"
+                await self.state_mgr.add_infraction(user_id, "RAGE_QUIT", detail)
+                logger.info(f"RAGE_QUIT logged for {member.display_name}: {detail}")
+
+        # 3. State Change in Same Channel
+        elif before.channel == after.channel and before.channel is not None:
+            session = self.voice_telemetry.get(user_id)
+            if not session:
+                session = {
+                    "channel_id": getattr(after.channel, 'id', 0),
+                    "channel_name": getattr(after.channel, 'name', 'الفويس'),
+                    "join_time": self.vc_join_times.get(user_id, now),
+                    "is_muted": False,
+                    "is_deafened": False,
+                    "is_streaming": False,
+                    "mute_start": None,
+                    "deafen_start": None,
+                    "last_unmute_start": None,
+                    "total_unmuted_seconds": 0.0,
+                    "last_spoke_time": 0.0,
+                    "afk_deafened_flagged": False
+                }
+                self.voice_telemetry[user_id] = session
+
             was_muted = getattr(before, 'self_mute', False) or getattr(before, 'mute', False)
             is_muted = getattr(after, 'self_mute', False) or getattr(after, 'mute', False)
+            was_deaf = getattr(before, 'self_deaf', False) or getattr(before, 'deaf', False)
+            is_deaf = getattr(after, 'self_deaf', False) or getattr(after, 'deaf', False)
+
+            session["is_muted"] = is_muted
+            session["is_deafened"] = is_deaf
+            session["is_streaming"] = getattr(after, 'self_stream', False)
+
+            # Mute transition tracking
+            spk = self.user_speak_history.setdefault(user_id, {"unmuted_sec": 0, "last_unmute": 0})
             if was_muted and not is_muted:
-                spk["last_unmute"] = time.time()
+                session["mute_start"] = None
+                session["last_unmute_start"] = now
+                session["last_spoke_time"] = now
+                spk["last_unmute"] = now
             elif not was_muted and is_muted:
-                if spk["last_unmute"] > 0:
-                    spk["unmuted_sec"] += (time.time() - spk["last_unmute"])
+                session["mute_start"] = now
+                if session.get("last_unmute_start"):
+                    session["total_unmuted_seconds"] += (now - session["last_unmute_start"])
+                    session["last_unmute_start"] = None
+                if spk.get("last_unmute", 0) > 0:
+                    spk["unmuted_sec"] += (now - spk["last_unmute"])
                     spk["last_unmute"] = 0
+
+            # Deafen transition tracking
+            if not was_deaf and is_deaf:
+                session["deafen_start"] = now
+            elif was_deaf and not is_deaf:
+                session["deafen_start"] = None
+                session["afk_deafened_flagged"] = False  # Reset flag upon return
 
         self.save_data()
 
     async def on_presence_update(self, before, after):
-        if after.bot:
+        if getattr(after, 'bot', False):
             return
-        if after.id in self.vc_join_times:
-            self.user_game_history.setdefault(after.id, set())
-            for activity in after.activities:
-                if activity.type == discord.ActivityType.playing:
-                    self.user_game_history[after.id].add(activity.name)
+
+        now = time.time()
+        user_id = after.id
+        in_voice = user_id in self.vc_join_times
+        voice_session = self.voice_telemetry.get(user_id)
+
+        # Track game popularity
+        if in_voice:
+            self.user_game_history.setdefault(user_id, set())
+            for activity in getattr(after, 'activities', []):
+                if getattr(activity, 'type', None) == discord.ActivityType.playing:
+                    self.user_game_history[user_id].add(activity.name)
                     self.game_popularity[activity.name] = self.game_popularity.get(activity.name, 0) + 1
-                    self.save_data()
+
+        # Run Contradiction Engine
+        contradictions = detect_presence_contradictions(after, in_voice=in_voice, voice_session=voice_session)
+        for crime_type, detail in contradictions:
+            cache_key = (user_id, crime_type)
+            last_logged = self.last_infraction_log.get(cache_key, 0)
+            # 1-hour (3600 seconds) debounce cooldown per user per infraction type
+            if (now - last_logged) >= 3600:
+                await self.state_mgr.add_infraction(user_id, crime_type, detail)
+                self.last_infraction_log[cache_key] = now
+                logger.info(f"STATUS_FRAUD infraction auto-logged for {getattr(after, 'display_name', user_id)}: {detail}")
+
+        self.save_data()
 
     # ─── Roast Generation Core ────────────────────────────────────────────────
 
@@ -187,25 +408,29 @@ class RoastBot(commands.Bot):
 
         mute_info = ""
         if member.voice:
-            if member.voice.self_deaf or member.voice.deaf:
+            if getattr(member.voice, 'self_deaf', False) or getattr(member.voice, 'deaf', False):
                 mute_info = "مسوي دفن (Deafened) ولا يسمع أحد"
-            elif member.voice.self_mute or member.voice.mute:
+            elif getattr(member.voice, 'self_mute', False) or getattr(member.voice, 'mute', False):
                 mute_info = "مسوي ميوت (صامت)"
             else:
                 mute_info = "المايك مفتوح"
 
         # تناقض الحالة
         contradiction = ""
-        for act in member.activities:
-            if act.type == discord.ActivityType.custom and act.name:
-                low = act.name.lower()
+        custom_status_text = ""
+        for act in getattr(member, 'activities', []):
+            if getattr(act, 'type', None) == discord.ActivityType.custom:
+                name_or_state = getattr(act, 'state', '') or getattr(act, 'name', '') or ''
+                custom_status_text = name_or_state
+                low = name_or_state.lower()
                 if any(w in low for w in ["sleep", "نايم", "نوم", "study", "مذاكرة", "busy", "مشغول"]):
-                    contradiction = f"كاتب في حالته: '{act.name}' وهو متواجد ومسهر!"
+                    contradiction = f"كاتب في حالته: '{name_or_state}' وهو متواجد ومسهر!"
 
         # اللهجة والشخصية
         active_dialect = custom_dialect or self.current_dialect
         dialect_instruction = get_dialect_prompt(active_dialect)
-        
+        intensity_val = max(1, min(5, int(custom_intensity or 3)))
+
         intensity_map = {
             1: "مداعبة خفيفة وحنونة ولطيفة جداً بدون أي تجريح",
             2: "طقطقة خفيفة ومرحة وودية",
@@ -213,9 +438,24 @@ class RoastBot(commands.Bot):
             4: "قوية وحارة وقصف جبهة لاذع ومستفز",
             5: "قصف نووي مدمر بدون أي رحمة وإحراج تام وكشف المستور"
         }
-        intensity_desc = intensity_map.get(custom_intensity or 3, intensity_map[3])
+        intensity_desc = intensity_map.get(intensity_val, intensity_map[3])
 
-        dossier_context = self.dossier_mgr.format_context_for_roast(member.id)
+        # Anti-repetition guardrails
+        recent_roasts = await self.state_mgr.get_recent_roasts(member.id, limit=5)
+        anti_rep_block = format_anti_repetition_prompt(recent_roasts)
+
+        # Live voice telemetry structure for dossier injection
+        live_telemetry = {
+            "channel_name": member.voice.channel.name if member.voice and getattr(member.voice, 'channel', None) else None,
+            "minutes": minutes_in_vc,
+            "muted": getattr(member.voice, 'self_mute', False) or getattr(member.voice, 'mute', False) if member.voice else False,
+            "deafened": getattr(member.voice, 'self_deaf', False) or getattr(member.voice, 'deaf', False) if member.voice else False,
+            "streaming": getattr(member.voice, 'self_stream', False) if member.voice else False,
+            "games": list(self.user_game_history.get(member.id, [])),
+            "custom_status": custom_status_text
+        }
+
+        dossier_context = self.dossier_mgr.format_context_for_roast(member.id, live_voice_context=live_telemetry)
         grudge_score = self.grudge_levels.get(member.id, 0)
         grudge_info = f"مستوى الحقد المتراكم عليه: {grudge_score}." if grudge_score > 10 else ""
 
@@ -236,6 +476,7 @@ class RoastBot(commands.Bot):
 {grudge_info}
 -------------------------------
 {topic_instruction}
+{anti_rep_block}
 
 التعليمات:
 1. التزم بنسبة 100% باللهجة المطلوبة ومصطلحاتها الأصيلة. ممنوع الفصحى نهائياً!
@@ -247,6 +488,16 @@ class RoastBot(commands.Bot):
 
             await channel.send(f"<@{member.id}> {roast_text}")
             self.last_roasted_user = member.id
+            self.last_roast_time = time.time()
+
+            # Record in permanent StateManager vault
+            await self.state_mgr.record_roast(
+                user_id=member.id,
+                username=member.display_name,
+                roast_text=roast_text,
+                dialect=active_dialect,
+                intensity=intensity_val
+            )
 
             self.roast_log.append((time.time(), member.display_name, roast_text))
             self.roast_log = self.roast_log[-100:]
@@ -255,12 +506,11 @@ class RoastBot(commands.Bot):
             import datetime
             today = datetime.date.today().isoformat()
             self.daily_roast_counts[today] = self.daily_roast_counts.get(today, 0) + 1
-            self.last_roast_time = time.time()
             self.grudge_levels[member.id] = self.grudge_levels.get(member.id, 0) + random.randint(2, 5)
             self.save_data()
             return roast_text
         except Exception as e:
-            print(f"Roast error: {e}")
+            logger.error(f"Roast error: {e}")
             return None
 
     # ─── Force & Targeted Commands ────────────────────────────────────────────
@@ -374,6 +624,43 @@ class RoastBot(commands.Bot):
         except Exception as e:
             print(f"Report error: {e}")
         self.daily_stats.clear()
+
+    @tasks.loop(seconds=60)
+    async def voice_intel_loop(self):
+        """
+        Periodic monitor detecting sustained AFK_DEAFENED violations
+        and asynchronous presence contradictions without waiting for gateway events.
+        """
+        now = time.time()
+        for guild in getattr(self, 'guilds', []):
+            for vc in getattr(guild, 'voice_channels', []):
+                if getattr(vc, 'id', None) == AFK_CHANNEL_ID:
+                    continue
+                members = getattr(vc, 'members', [])
+                if not isinstance(members, (list, tuple, set)):
+                    continue
+                for m in members:
+                    if getattr(m, 'bot', False):
+                        continue
+
+                    session = self.voice_telemetry.get(m.id)
+                    if not session:
+                        continue
+
+                    # AFK_DEAFENED: Muted & deafened for >= 15 minutes (900 seconds)
+                    is_muted = session.get("is_muted", False)
+                    is_deaf = session.get("is_deafened", False)
+                    deafen_start = session.get("deafen_start")
+
+                    if is_muted and is_deaf and deafen_start:
+                        duration_sec = now - deafen_start
+                        if duration_sec >= 900 and not session.get("afk_deafened_flagged", False):
+                            mins = int(duration_sec / 60)
+                            vc_name = getattr(vc, 'name', 'الفويس')
+                            detail = f"صنم مسوي ميوت ودفن لأكثر من {mins} دقيقة متواصلة في روم '{vc_name}'!"
+                            await self.state_mgr.add_infraction(m.id, "AFK_DEAFENED", detail)
+                            session["afk_deafened_flagged"] = True
+                            logger.info(f"AFK_DEAFENED logged for {getattr(m, 'display_name', m.id)}: {detail}")
 
     # ─── On Message (Images & Chat) ───────────────────────────────────────────
 

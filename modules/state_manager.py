@@ -18,6 +18,14 @@ from typing import Any, Optional
 
 logger = logging.getLogger("mr_roast.state_manager")
 
+GRUDGE_TITLES = {
+    1: "مواطن مسالم (تحت المراقبة العادية)",
+    2: "مثير للشبهات (سوابق ونكبات خفيفة)",
+    3: "مطلوب أمنياً في قضايا تخريب وتهرب",
+    4: "عدو الشعب الأول ومجرم رانكات محترف",
+    5: "مجرم حرب سيرفرية (هدف تصفية نووية قصوى)"
+}
+
 
 class StateManager:
     """
@@ -304,8 +312,16 @@ class StateManager:
                     except OSError:
                         pass
 
-                os.replace(temp_path, self.filepath)
-                temp_path = None
+                # Guard against transient Windows NTFS file locks (WinError 5)
+                for attempt in range(5):
+                    try:
+                        os.replace(temp_path, self.filepath)
+                        temp_path = None
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.025)
             finally:
                 if temp_path and os.path.exists(temp_path):
                     try:
@@ -542,21 +558,83 @@ class StateManager:
                 "crimes_count": len(d.get("crimes", [])) + len(d.get("embarrassing_moments", []))
             }
 
-    def format_context_for_roast(self, user_id: int | str) -> str:
+    def format_context_for_roast(self, user_id: int | str, live_voice_context: Optional[dict] = None) -> str:
+        """
+        Dynamically formats the criminal dossier and live telemetry for system prompt injection.
+        Integrates bounded 1-5 grudge score, grudge titles, categorized infractions
+        (AFK_DEAFENED, STATUS_FRAUD, RAGE_QUIT), excuses, and embarrassing moments.
+        """
         with self._thread_lock:
             d = self.get_user_dossier(user_id)
-            parts = []
-            if d.get("titles"):
-                parts.append(f"ألقابه الساخرة المعروفة: {', '.join(d['titles'][-3:])}")
+            lines = []
+
+            # 1. Grudge & Classification
+            grudge_lvl = max(1, min(5, int(d.get("grudge_level") or 1)))
+            grudge_title = GRUDGE_TITLES.get(grudge_lvl, GRUDGE_TITLES[1])
+            titles_str = ", ".join(d.get("titles", [])) if d.get("titles") else "عضو تحت المراقبة"
+            lines.append(f"• مستوى الحقد والعداوة: [{grudge_lvl}/5] - «{grudge_title}»")
+            lines.append(f"• الألقاب الساخرة المعروفة: {titles_str}")
+
+            # 2. Infractions & Criminal Record
+            infractions = d.get("infractions") or []
+            if infractions:
+                crime_counts = {}
+                recent_details = []
+                for inf in infractions[-8:]:
+                    itype = inf.get("type", "CRIME")
+                    crime_counts[itype] = crime_counts.get(itype, 0) + 1
+                    recent_details.append(f"[{itype}] {inf.get('detail', '')}")
+
+                summary_parts = []
+                if "AFK_DEAFENED" in crime_counts:
+                    summary_parts.append(f"سوابق نوم ودفن بالفويس ({crime_counts['AFK_DEAFENED']} مرات)")
+                if "STATUS_FRAUD" in crime_counts:
+                    summary_parts.append(f"تزوير الحالة والهروب ({crime_counts['STATUS_FRAUD']} مرات)")
+                if "RAGE_QUIT" in crime_counts:
+                    summary_parts.append(f"هروب ريج كويت تكتيكي ({crime_counts['RAGE_QUIT']} مرات)")
+
+                if summary_parts:
+                    lines.append(f"• ملخص الجرائم المستمرة: {', '.join(summary_parts)}")
+                lines.append(f"• أحدث السوابق والفضائح الموثقة: {'; '.join(recent_details[-3:])}")
+            elif d.get("crimes"):
+                lines.append(f"• سجل الجرائم: {'; '.join(d['crimes'][-3:])}")
+
+            # 3. Voice Telemetry (Live + Cumulative)
+            if live_voice_context:
+                v_desc = []
+                if live_voice_context.get("channel_name"):
+                    v_desc.append(f"متواجد في روم '{live_voice_context['channel_name']}' منذ {live_voice_context.get('minutes', 0)} دقيقة")
+                if live_voice_context.get("deafened"):
+                    v_desc.append("مسوي دفن (أصم) وما يسمع أحد")
+                elif live_voice_context.get("muted"):
+                    v_desc.append("مسوي ميوت (صامت)")
+                else:
+                    v_desc.append("المايك مفتوح وشغال سوالف")
+                if live_voice_context.get("games"):
+                    v_desc.append(f"يلعب حالياً: {', '.join(live_voice_context['games'])}")
+                if live_voice_context.get("custom_status"):
+                    v_desc.append(f"حالته المكتوبة: '{live_voice_context['custom_status']}'")
+                lines.append(f"• الرادار الصوتي الحي: {', '.join(v_desc)}")
+            else:
+                # Historical cumulative voice stats
+                v_stats = d.get("voice_stats") or {}
+                total_mins = v_stats.get("total_vc_minutes", 0)
+                if total_mins > 0:
+                    hours = total_mins // 60
+                    rem_mins = total_mins % 60
+                    lines.append(f"• السجل الصوتي التراكمي: قضى {hours} ساعة و {rem_mins} دقيقة سهر بالفويس")
+
+            # 4. Excuses & Embarrassing Moments
             if d.get("excuses"):
-                parts.append(f"أعذاره المشهورة لما ينكب: {', '.join(d['excuses'][-3:])}")
+                lines.append(f"• أشهر تصريفاته وأعذاره: {', '.join(d['excuses'][-3:])}")
             if d.get("embarrassing_moments"):
-                parts.append(f"فضائح سابقة له: {'; '.join(d['embarrassing_moments'][-2:])}")
-            if d.get("crimes"):
-                parts.append(f"سجل جرائمه في السيرفر: {'; '.join(d['crimes'][-2:])}")
-            if parts:
-                return "--- ملف سوابق الضحية (استخدم هذه المعلومات لذبّة شخصية وقاتلة) ---\n" + "\n".join(parts) + "\n----------------------------------------"
-            return ""
+                lines.append(f"• زلات ومواقف محرجة سابقة: {'; '.join(d['embarrassing_moments'][-2:])}")
+
+            return (
+                "--- ملف سوابق واستخبارات الضحية (استخدم هذه المعلومات لذبّة شخصية قاتلة تكشف المستور) ---\n"
+                + "\n".join(lines)
+                + "\n----------------------------------------------------------------------------------"
+            )
 
 
 # Singleton instance for system-wide injection

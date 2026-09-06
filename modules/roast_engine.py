@@ -1,4 +1,4 @@
-﻿"""
+"""
 roast_engine.py - محرك الذبات المتقدم 3.0
 يشمل:
 1. جلسات محكمة السيرفر (Server Court & Trials)
@@ -14,6 +14,7 @@ from google import genai
 from google.genai import types
 from modules.dialects import DIALECTS, get_dialect_prompt
 from modules.dossier import dossier_mgr
+from modules.ai_service import get_genai_client
 
 class RoastEngine:
     def __init__(self):
@@ -22,7 +23,7 @@ class RoastEngine:
         self.api_key = os.getenv("GEMINI_API_KEY")
 
     def _get_client(self):
-        return genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        return get_genai_client()
 
     async def generate_trial_indictment(self, defendant_name: str, charge: str, dialect: str = "default") -> dict:
         """توليد لائحة اتهام رسمية ساخرة لمحكمة السيرفر."""

@@ -67,8 +67,8 @@ Every feature from `ORIGINAL_REQUEST.md` and the Phase 0 Survey is mapped below:
 
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | First-Principles Core & Atomic Data Layer | Decoupled startup, atomic StateManager/DossierVault, /health route, clean Procfile/manifests, purge audio bloat | none | IN_PROGRESS |
-| M2 | Contextual Intelligence & Saudi Dialect Engine | Unified Gemini Flash client with High Thinking & backoff, Voice Intelligence, 4-Dialect engine, 1-5 Grudge scale | M1 | PLANNED |
+| M1 | First-Principles Core & Atomic Data Layer | Decoupled startup, atomic StateManager/DossierVault, /health route, clean Procfile/manifests, purge audio bloat | none | DONE |
+| M2 | Contextual Intelligence & Saudi Dialect Engine | Unified Gemini Flash client with High Thinking & backoff, Voice Intelligence, 4-Dialect engine, 1-5 Grudge scale | M1 | IN_PROGRESS |
 | M3 | Editorial-Grade Web Command Center & Audio Suite | Courtroom live sync, 1v1 Arena, Holographic Shame Cards, 4-Way Dialect Simulator, Cyber CLI, Web Audio synth | M1, M2 | PLANNED |
 | M4 | Final Milestone: E2E Verification & Adversarial Hardening | Pass 100% Tiers 1-4 E2E test suite + Tier 5 adversarial coverage hardening + Render deployment readiness | M1, M2, M3, E2E | PLANNED |
 
