@@ -13,8 +13,14 @@ if not all([DISCORD_TOKEN, GEMINI_API_KEY]):
     raise ValueError("Missing critical environment variables! Please check your .env file.")
 
 # Gemini Settings
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_TEMPERATURE = 0.9
+GEMINI_THINKING_LEVEL = "high"
+GEMINI_TOOLS = [
+    {
+        "type": "google_search",
+    },
+]
 
 # Whisper Settings
 WHISPER_MODEL = "small"

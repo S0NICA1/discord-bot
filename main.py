@@ -28,8 +28,31 @@ AFK_CHANNEL_ID  = 782986605148635166  # روم AFK - البوت يتجاهل ا�
 
 # Gemini clients
 client         = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME     = "gemini-3-flash-preview"   # نموذج توليد النص
+MODEL_NAME     = "gemini-flash-latest"   # نموذج توليد النص
 TTS_MODEL_NAME = "gemini-2.5-flash-preview-tts"  # نموذج الصوت
+
+
+async def generate_content_ai(contents, system_instruction=None):
+    """توليد النص باستخدام Gemini مع التفكير العالي وأداة البحث في قوقل وآلية احتياطية."""
+    try:
+        cfg = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            system_instruction=system_instruction,
+        )
+        return await client.aio.models.generate_content(
+            model=MODEL_NAME, contents=contents, config=cfg
+        )
+    except Exception as e:
+        print(f"Generation with search tool failed ({e}), retrying without search...")
+        cfg_fallback = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+            system_instruction=system_instruction,
+        )
+        return await client.aio.models.generate_content(
+            model=MODEL_NAME, contents=contents, config=cfg_fallback
+        )
+
 
 # Configure Intents
 intents = discord.Intents.default()
@@ -467,9 +490,7 @@ class RoastBot(commands.Bot):
         )
 
         try:
-            response = await client.aio.models.generate_content(
-                model=MODEL_NAME, contents=prompt
-            )
+            response = await generate_content_ai(contents=prompt)
             roast_text = response.text.strip()
 
             await channel.send(f"<@{member.id}> {roast_text}")
@@ -653,9 +674,7 @@ class RoastBot(commands.Bot):
         )
 
         try:
-            response = await client.aio.models.generate_content(
-                model=MODEL_NAME, contents=report_prompt
-            )
+            response = await generate_content_ai(contents=report_prompt)
             await channel.send(f"📊 **تقرير مستر ذبات اليومي 🌙**\n\n{response.text.strip()}")
         except Exception as e:
             print(f"Daily report error: {e}")
@@ -770,9 +789,7 @@ class RoastBot(commands.Bot):
                         image_bytes = await att.read()
                         part = types.Part.from_bytes(data=image_bytes, mime_type=att.content_type)
                         async with message.channel.typing():
-                            response = await client.aio.models.generate_content(
-                                model=MODEL_NAME, contents=[prompt, part]
-                            )
+                            response = await generate_content_ai(contents=[prompt, part])
                             roast_text = response.text.strip()
                             await message.reply(roast_text)
                             

@@ -1,7 +1,8 @@
 import logging
 from datetime import datetime, timedelta
 from google import genai
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from google.genai import types
+from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_THINKING_LEVEL, GEMINI_TOOLS
 import modules.config_sync as config_sync
 
 logger = logging.getLogger(__name__)
@@ -73,14 +74,28 @@ def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc
         contents = history.copy()
         contents.append({"role": "user", "parts": [{"text": formatted_prompt}]})
         
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=config_sync.get_persona(),
-                temperature=config_sync.get_temperature(),
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=config_sync.get_persona(),
+                    temperature=config_sync.get_temperature(),
+                    thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                )
             )
-        )
+        except Exception as search_err:
+            logger.warning(f"Generation with search tool failed ({search_err}), retrying without search: {search_err}")
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=config_sync.get_persona(),
+                    temperature=config_sync.get_temperature(),
+                    thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+                )
+            )
         
         reply_text = response.text
         if not reply_text:

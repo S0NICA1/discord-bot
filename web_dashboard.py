@@ -328,7 +328,7 @@ async def handle_ai_report(request):
             "{\"title\": \"عنوان التقرير\", \"toxic_user\": \"أكثر عضو انجلد\", \"quiet_user\": \"أصنم عضو (اختر عشوائيا اذا لم يوجد)\", \"summary\": \"ملخص ساخر للوضع سطرين\", \"advice\": \"نصيحة للإدمن\"}"
         )
         response = await client.aio.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-flash-latest",
             contents=prompt,
         )
         text = response.text.replace('```json', '').replace('```', '').strip()
@@ -358,7 +358,7 @@ async def handle_build_persona(request):
                 "الرد يجب أن يكون بصيغة JSON فقط بدون نصوص إضافية."
             )
             response = await client.aio.models.generate_content(
-                model="gemini-3-flash-preview",
+                model="gemini-flash-latest",
                 contents=[prompt, part],
             )
             text = response.text.replace('```json', '').replace('```', '').strip()
@@ -387,7 +387,7 @@ async def handle_start_minigame(request):
         from google import genai
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         response = await client.aio.models.generate_content(
-            model="gemini-3-flash-preview", contents=prompt
+            model="gemini-flash-latest", contents=prompt
         )
         # Fetch MAIN_CHANNEL_ID
         ch = bot.get_channel(bot.get_channel(782986605148635166).guild.text_channels[0].id) # fallback
