@@ -1,23 +1,32 @@
 """
-web_dashboard.py – لوحة تحكم شاملة لبوت مستر ذبات
-14 ميزة: إحصائيات، لوحة العار، رسم بياني، أوقات الذروة، ألعاب شعبية،
-ذبة موجهة، سلايدر الوقت، قائمة حماية، رسالة حرة، لوق كامل،
-حالة البوت، إشعارات، وضع ليلي/نهاري، متجاوب
+web_dashboard.py - لوحة تحكم مستر ذبات 3.0 (Quantum Cyber Deck)
+الجيل الجديد من منصات قيادة وتوجيه الذبات والمحاكمات السيرفرية:
+1. Tactical Operations Command (مركز العمليات التكتيكي والرادار الحي)
+2. Shame Card Holographic Studio (استوديو بطاقات العار الرقمية التفاعلي)
+3. The Server Courtroom (محكمة السيرفر العليا وتصويت المحلفين الحي)
+4. 1v1 Roast Battle Arena (حلبة مواجهات الذبات وتحكيم الذكاء الاصطناعي)
+5. Dialect Nexus & 4-Way Comparative Simulator (مختبر ومحاكي اللهجات الأربعة)
+6. Criminal Dossier Vault (أرشيف السوابق والفضائح وجرائم السيرفر)
+7. Deep Intelligence & Analytics (التحليلات، الرادار، وقائمة الحماية)
+8. Cyber CLI Terminal (طرفية الأوامر السريعة المباشرة)
 """
 import asyncio
+import io
 import json
 import os
+import random
 import time
 import discord
 from aiohttp import web
 from google import genai
 from google.genai import types
-from modules.dialects import DIALECTS, get_dialect_prompt
+from modules.dialects import DIALECTS, get_dialect_prompt, get_comparative_prompt
 from modules.dossier import dossier_mgr
+from modules.roast_engine import roast_engine
 
 AFK_CHANNEL_ID = 782986605148635166
 
-# ─── API endpoints ──────────────────────────────────────────────────────
+# ─── API Endpoints ──────────────────────────────────────────────────────────
 
 async def handle_stats(request):
     bot = request.app["bot"]
@@ -45,78 +54,130 @@ async def handle_stats(request):
                     custom_status = ""
                     for act in m.activities:
                         if act.type == discord.ActivityType.playing:
-                            activities.append({"type":"playing","name":act.name})
+                            activities.append({"type": "playing", "name": act.name})
                         elif act.type == discord.ActivityType.streaming:
-                            activities.append({"type":"streaming","name":getattr(act,'game',act.name)})
+                            activities.append({"type": "streaming", "name": getattr(act, 'game', act.name)})
                         elif act.type == discord.ActivityType.listening:
-                            activities.append({"type":"listening","name":act.name})
+                            activities.append({"type": "listening", "name": act.name})
                         elif act.type == discord.ActivityType.custom:
-                            custom_status = getattr(act,'name','') or getattr(act,'state','') or ''
-                    # حساب نسبة الكلام
+                            custom_status = getattr(act, 'name', '') or getattr(act, 'state', '') or ''
+
                     spk = bot.user_speak_history.get(m.id, {"unmuted_sec": 0, "last_unmute": 0})
                     unmuted_time = spk["unmuted_sec"]
                     if spk["last_unmute"] > 0:
                         unmuted_time += (time.time() - spk["last_unmute"])
-                    
+
                     speak_ratio = 0
                     if mins > 0:
-                        speak_ratio = int((unmuted_time / (mins * 60)) * 100)
+                        speak_ratio = min(100, int((unmuted_time / (mins * 60)) * 100))
+
+                    u_dossier = bot.dossier_mgr.get_user_dossier(m.id)
 
                     members_in_vc.append({
-                        "id":m.id,"name":m.display_name,
-                        "avatar":str(m.display_avatar.url),
-                        "minutes":mins,"channel":vc.name,"games":games,
-                        "activities":activities,"custom_status":custom_status,
-                        "muted":m.voice.self_mute or m.voice.mute if m.voice else False,
-                        "deafened":m.voice.self_deaf or m.voice.deaf if m.voice else False,
-                        "streaming":m.voice.self_stream if m.voice else False,
-                        "status":str(m.status),
+                        "id": m.id,
+                        "name": m.display_name,
+                        "avatar": str(m.display_avatar.url),
+                        "minutes": mins,
+                        "channel": vc.name,
+                        "games": games,
+                        "activities": activities,
+                        "custom_status": custom_status,
+                        "muted": m.voice.self_mute or m.voice.mute if m.voice else False,
+                        "deafened": m.voice.self_deaf or m.voice.deaf if m.voice else False,
+                        "streaming": m.voice.self_stream if m.voice else False,
+                        "status": str(m.status),
                         "protected": m.id in bot.protected_users,
-                        "speak_ratio": speak_ratio
+                        "speak_ratio": speak_ratio,
+                        "title": u_dossier.get("titles", ["عضو عادي"])[0] if u_dossier.get("titles") else "عضو عادي",
+                        "excuse_count": len(u_dossier.get("excuses", [])),
+                        "crime_count": len(u_dossier.get("crimes", [])),
+                        "grudge": bot.grudge_levels.get(m.id, 0)
                     })
 
-    # كل الأعضاء
     all_members = []
     for guild in bot.guilds:
         for m in guild.members:
             if not m.bot:
-                all_members.append({"id":m.id,"name":m.display_name,"avatar":str(m.display_avatar.url)})
+                all_members.append({
+                    "id": m.id,
+                    "name": m.display_name,
+                    "avatar": str(m.display_avatar.url),
+                    "status": str(m.status)
+                })
 
-    # لوحة العار والحقد
     shame = []
     for guild in bot.guilds:
-        for uid, cnt in sorted(bot.roast_count_per_user.items(), key=lambda x:-x[1])[:15]:
+        for uid, cnt in sorted(bot.roast_count_per_user.items(), key=lambda x: -x[1])[:15]:
             m = guild.get_member(uid)
             if m:
-                grudge_lvl = getattr(bot, 'grudge_levels', {}).get(uid, 0)
-                shame.append({"id":uid,"name":m.display_name,"avatar":str(m.display_avatar.url),"count":cnt,"grudge":grudge_lvl})
+                grudge_lvl = bot.grudge_levels.get(uid, 0)
+                u_dos = bot.dossier_mgr.get_user_dossier(uid)
+                top_excuse = u_dos.get("excuses", ["لا توجد تصريفات"])[0] if u_dos.get("excuses") else "لا توجد"
+                title = u_dos.get("titles", ["المستهدف"])[0] if u_dos.get("titles") else "المستهدف"
+                shame.append({
+                    "id": uid,
+                    "name": m.display_name,
+                    "avatar": str(m.display_avatar.url),
+                    "count": cnt,
+                    "grudge": grudge_lvl,
+                    "title": title,
+                    "top_excuse": top_excuse
+                })
 
-    # ألعاب شعبية
-    top_games = sorted(bot.game_popularity.items(), key=lambda x:-x[1])[:10]
-    top_games = [{"name":g,"count":c} for g,c in top_games]
+    top_games = sorted(bot.game_popularity.items(), key=lambda x: -x[1])[:10]
+    top_games = [{"name": g, "count": c} for g, c in top_games]
 
-    # آخر 7 أيام ذبات
     import datetime
     daily = {}
     for i in range(7):
         d = (datetime.date.today() - datetime.timedelta(days=6-i)).isoformat()
         daily[d] = bot.daily_roast_counts.get(d, 0)
 
-    recent_roasts = [{"time":r[0],"member":r[1],"roast":r[2]} for r in bot.roast_log[-100:]]
+    recent_roasts = [{"time": r[0], "member": r[1], "roast": r[2]} for r in bot.roast_log[-100:]]
+
     protected_list = []
     for guild in bot.guilds:
         for uid in bot.protected_users:
             m = guild.get_member(uid)
             if m:
-                protected_list.append({"id":uid,"name":m.display_name,"avatar":str(m.display_avatar.url)})
+                protected_list.append({"id": uid, "name": m.display_name, "avatar": str(m.display_avatar.url)})
 
     next_roast_in = 0
     if bot.roast_loop.is_running() and bot.roast_loop.next_iteration:
         diff = (bot.roast_loop.next_iteration - discord.utils.utcnow()).total_seconds()
         next_roast_in = max(0, int(diff / 60))
 
+    # AI Alerts
+    alerts = []
+    for m in members_in_vc:
+        if m["minutes"] > 60 and (m.get("deafened", False) or m.get("muted", False)):
+            alerts.append({"type": "warning", "msg": f"🎯 فرصة قصف: {m['name']} صنم ومسوي ميوت/دفن من أكثر من {m['minutes']} دقيقة!"})
+        if m.get("streaming", False) and len(members_in_vc) == 1:
+            alerts.append({"type": "info", "msg": f"📺 بث انفرادي: {m['name']} يبث لنفسه لحاله بالروم بدون جمهور!"})
+        if m.get("grudge", 0) >= 15:
+            alerts.append({"type": "danger", "msg": f"🔥 حقد متراكم: العداد وصل {m['grudge']} على {m['name']}، يحتاج قصف تأديبي!"})
+
+    # Recent Crimes from Dossiers
+    recent_crimes = []
+    for uid, dos in list(bot.dossier_mgr.data.items())[:20]:
+        for cr in dos.get("crimes", []):
+            recent_crimes.append({"user_id": uid, "crime": cr})
+
+    dialects_data = [
+        {
+            "id": k,
+            "name": v["name"],
+            "region": v["region"],
+            "icon": v["icon"],
+            "badge": v["badge"],
+            "catchphrases": v["catchphrases"],
+            "metrics": v.get("metrics", {"sharpness": 85, "speed": 90, "authenticity": 95, "humor": 90})
+        }
+        for k, v in DIALECTS.items()
+    ]
+
     data = {
-        "bot_name": bot.user.name if bot.user else "مستر ذبات",
+        "bot_name": bot.user.name if bot.user else "مستر ذبات 3.0",
         "bot_avatar": str(bot.user.display_avatar.url) if bot.user else "",
         "roast_loop_running": bot.roast_loop.is_running(),
         "members_in_vc": members_in_vc,
@@ -135,81 +196,24 @@ async def handle_stats(request):
         "next_roast_in": next_roast_in,
         "interval_min": bot.roast_interval_min,
         "interval_max": bot.roast_interval_max,
-        "current_voice": getattr(bot, "current_voice", "Kore"),
-        "current_persona": getattr(bot, "current_persona", "troll"),
-        "voice_join_allowed": getattr(bot, "voice_join_allowed", True),
-        "voice_proactive_audio": getattr(bot, "voice_proactive_audio", False),
-        "voice_auto_leave_sec": getattr(bot, "voice_auto_leave_sec", 120),
-        "voice_ai_mode": getattr(bot, "voice_ai_mode", "helper"),
-        "voice_sessions_active": len(getattr(bot, "voice_sessions", {})),
-        "voice_session_log": getattr(bot, "voice_session_log", [])[-20:],
-        "voice_ignored": [{"id":uid,"name":str(uid)} for uid in getattr(bot, "voice_ignored_users", set())],
         "current_dialect": getattr(bot, "current_dialect", "default"),
-        "dialects": [
-            {
-                "id": k,
-                "name": v["name"],
-                "region": v["region"],
-                "icon": v["icon"],
-                "badge": v["badge"],
-                "catchphrase": v["catchphrases"][0]
-            }
-            for k, v in DIALECTS.items()
-        ],
+        "dialects": dialects_data,
+        "alerts": alerts,
+        "recent_crimes": recent_crimes[-10:]
     }
-    
-    # تحذيرات الإدمن (AI Alerts)
-    alerts = []
-    for m in members_in_vc:
-        if m["minutes"] > 60 and (m.get("deafened", False) or m.get("muted", False)):
-            alerts.append(f"🎯 فرصة ذبة: {m['name']} مسوي دفن/ميوت من أكثر من ساعة!")
-        if m.get("streaming", False) and len(members_in_vc) == 1:
-            alerts.append(f"📺 فرصة ذبة: {m['name']} يبث لحاله بالروم!")
-    data["alerts"] = alerts
-    
-    # تحسين الأسماء المتجاهلة
-    for g in bot.guilds:
-        for v in data["voice_ignored"]:
-            m = g.get_member(v["id"])
-            if m: v["name"] = m.display_name; v["avatar"] = str(m.display_avatar.url)
     return web.Response(text=json.dumps(data, ensure_ascii=False), content_type="application/json")
+
+
+async def handle_toggle(request):
+    bot = request.app["bot"]
+    running = await bot.toggle_roast_loop()
+    return web.Response(text=json.dumps({"running": running}), content_type="application/json")
 
 
 async def handle_force_roast(request):
     bot = request.app["bot"]
     asyncio.create_task(bot.force_random_roast())
     return web.Response(text='{"ok":true}', content_type="application/json")
-
-
-async def handle_toggle(request):
-    bot = request.app["bot"]
-    running = await bot.toggle_roast_loop()
-    return web.Response(text=json.dumps({"running":running}), content_type="application/json")
-
-
-async def handle_custom_roast(request):
-    bot = request.app["bot"]
-    try:
-        body = await request.json()
-        mid = int(body.get("member_id",0)); txt = body.get("text","").strip()
-        if not mid or not txt:
-            return web.Response(text='{"ok":false,"error":"missing"}', content_type="application/json")
-        ok = await bot.send_custom_roast(mid, txt)
-        return web.Response(text=json.dumps({"ok":ok}), content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
-
-
-async def handle_free_message(request):
-    bot = request.app["bot"]
-    try:
-        body = await request.json()
-        txt = body.get("text","").strip()
-        if not txt: return web.Response(text='{"ok":false}', content_type="application/json")
-        ok = await bot.send_free_message(txt)
-        return web.Response(text=json.dumps({"ok":ok}), content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
 
 
 async def handle_targeted_roast(request):
@@ -220,16 +224,41 @@ async def handle_targeted_roast(request):
         topic = body.get("topic", "").strip() or None
         intensity = int(body.get("intensity", 3))
         dialect = body.get("dialect", "").strip() or None
-        play_audio = bool(body.get("play_audio", True))
         if not mid:
             return web.Response(text='{"ok":false,"error":"العضو غير محدد"}', content_type="application/json")
         ok = await bot.targeted_roast(
             mid,
             topic=topic,
             intensity=intensity,
-            dialect=dialect,
-            play_audio=play_audio
+            dialect=dialect
         )
+        return web.Response(text=json.dumps({"ok": ok}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_custom_roast(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        mid = int(body.get("member_id", 0))
+        txt = body.get("text", "").strip()
+        if not mid or not txt:
+            return web.Response(text='{"ok":false,"error":"بيانات ناقصة"}', content_type="application/json")
+        ok = await bot.send_custom_roast(mid, txt)
+        return web.Response(text=json.dumps({"ok": ok}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_free_message(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        txt = body.get("text", "").strip()
+        if not txt:
+            return web.Response(text='{"ok":false}', content_type="application/json")
+        ok = await bot.send_free_message(txt)
         return web.Response(text=json.dumps({"ok": ok}), content_type="application/json")
     except Exception as e:
         return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
@@ -248,6 +277,33 @@ async def handle_change_dialect(request):
                 content_type="application/json"
             )
         return web.Response(text=json.dumps({"ok": False, "error": "اللهجة غير صالحة"}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_change_interval(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        mn = int(body.get("min", 120))
+        mx = int(body.get("max", 240))
+        mn, mx = bot.change_interval(mn, mx)
+        return web.Response(text=json.dumps({"ok": True, "min": mn, "max": mx}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_protect(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        mid = int(body.get("member_id", 0))
+        action = body.get("action", "add")
+        if action == "add":
+            bot.protected_users.add(mid)
+        else:
+            bot.protected_users.discard(mid)
+        return web.Response(text='{"ok":true}', content_type="application/json")
     except Exception as e:
         return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
@@ -279,1558 +335,2491 @@ async def handle_add_dossier_item(request):
             bot.dossier_mgr.add_title(mid, content)
         elif item_type == "moment":
             bot.dossier_mgr.add_moment(mid, content)
+        elif item_type == "crime":
+            bot.dossier_mgr.add_crime(mid, content)
         return web.Response(text=json.dumps({"ok": True, "dossier": bot.dossier_mgr.get_user_dossier(mid)}), content_type="application/json")
     except Exception as e:
         return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_change_interval(request):
+async def handle_shame_card(request):
+    """توليد كود بطاقة العار SVG وبياناتها."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        mn = int(body.get("min",120)); mx = int(body.get("max",240))
-        mn, mx = bot.change_interval(mn, mx)
-        return web.Response(text=json.dumps({"ok":True,"min":mn,"max":mx}), content_type="application/json")
+        mid = int(body.get("member_id", 0))
+        dialect = body.get("dialect", bot.current_dialect)
+
+        member = None
+        for g in bot.guilds:
+            member = g.get_member(mid)
+            if member:
+                break
+
+        name = member.display_name if member else f"عضو #{mid}"
+        avatar = str(member.display_avatar.url) if member else ""
+
+        card_data = bot.dossier_mgr.get_shame_card_data(mid, name, avatar)
+
+        # توليد الذبة السريعة
+        from main import generate_content_ai
+        roast_prompt = f"أنت مستر ذبات. اكتب ذبة لبطاقة العار الرسمية للعضو '{name}' عن جريمته '{card_data.get('crime')}'. سطر واحد فقط قوي جداً بلهجة {dialect}."
+        try:
+            resp = await generate_content_ai(contents=roast_prompt)
+            roast_txt = resp.text.strip()
+        except Exception:
+            roast_txt = f"أشهر تصريفاته: {card_data.get('top_excuse')}"
+
+        badge = DIALECTS.get(dialect, DIALECTS["default"])["badge"]
+        svg_code = bot.roast_engine.generate_shame_card_svg(card_data, roast_txt, badge)
+
+        return web.Response(
+            text=json.dumps({
+                "ok": True,
+                "card_data": card_data,
+                "roast_text": roast_txt,
+                "svg": svg_code
+            }, ensure_ascii=False),
+            content_type="application/json"
+        )
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_protect(request):
+async def handle_shame_card_send(request):
+    """إرسال بطاقة العار مباشرة لروم الديسكورد."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        mid = int(body.get("member_id",0)); action = body.get("action","add")
-        if action == "add":
-            bot.protected_users.add(mid)
-        else:
-            bot.protected_users.discard(mid)
-        return web.Response(text='{"ok":true}', content_type="application/json")
+        mid = int(body.get("member_id", 0))
+        dialect = body.get("dialect", bot.current_dialect)
+
+        member = None
+        for g in bot.guilds:
+            member = g.get_member(mid)
+            if member:
+                break
+
+        if not member:
+            return web.Response(text=json.dumps({"ok": False, "error": "العضو غير موجود بالسيرفر"}), content_type="application/json")
+
+        card_data = bot.dossier_mgr.get_shame_card_data(mid, member.display_name, str(member.display_avatar.url))
+
+        from main import generate_content_ai
+        roast_prompt = f"أنت مستر ذبات. اكتب ذبة لبطاقة العار الرسمية للعضو '{member.display_name}' عن جريمته '{card_data.get('crime')}'. سطر واحد فقط قوي جداً بلهجة {dialect}."
+        try:
+            resp = await generate_content_ai(contents=roast_prompt)
+            roast_txt = resp.text.strip()
+        except Exception:
+            roast_txt = f"أشهر تصريفاته: {card_data.get('top_excuse')}"
+
+        badge = DIALECTS.get(dialect, DIALECTS["default"])["badge"]
+        svg_code = bot.roast_engine.generate_shame_card_svg(card_data, roast_txt, badge)
+
+        target_ch = bot.get_channel(int(os.getenv("MAIN_CHANNEL_ID", 0))) or (bot.guilds[0].system_channel if bot.guilds else None)
+        if not target_ch:
+            return web.Response(text=json.dumps({"ok": False, "error": "لم يتم العثور على روم لإرسال البطاقة"}), content_type="application/json")
+
+        file_bytes = io.BytesIO(svg_code.encode("utf-8"))
+        discord_file = discord.File(file_bytes, filename=f"shame_card_{mid}.svg")
+
+        embed = discord.Embed(
+            title=f"🎴 بطاقة العار الرسمية: {member.display_name}",
+            description=f"**اللقب:** {card_data.get('title')}\n**التهمة:** {card_data.get('crime')}\n\n**الإحصائيات الساخرة:**\n• نسبة التصريف: `{card_data['stats']['excuses']}%`\n• دقة الإيم: `{card_data['stats']['aim']}%`\n• معدل النكبة: `{card_data['stats']['choke']}%`\n• ساعات النوم: `{card_data['stats']['sleep']} ساعة`\n\n🎯 **الحكم:**\n\"{roast_txt}\"",
+            color=0xa855f7
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await target_ch.send(content=f"🚨 **إشعار عار رسمي من لوحة التحكم:**", file=discord_file, embed=embed)
+
+        return web.Response(text=json.dumps({"ok": True}), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_change_voice(request):
+async def handle_court_start(request):
+    """بدء جلسة محاكمة علنية طارئة ضد عضو وإرسالها للديسكورد مع أزرار التصويت."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        voice = body.get("voice", "Kore")
-        bot.current_voice = voice
-        return web.Response(text=json.dumps({"ok":True,"voice":voice}), content_type="application/json")
+        mid = int(body.get("defendant_id", 0))
+        charge = body.get("charge", "الصنم الأبدي وتخريب أجواء السيرفر").strip()
+        dialect = body.get("dialect", bot.current_dialect)
+
+        member = None
+        for g in bot.guilds:
+            member = g.get_member(mid)
+            if member:
+                break
+
+        if not member:
+            return web.Response(text=json.dumps({"ok": False, "error": "المتهم غير موجود بالسيرفر"}), content_type="application/json")
+
+        indictment = await bot.roast_engine.generate_trial_indictment(member.display_name, charge, dialect=dialect)
+
+        target_ch = bot.get_channel(int(os.getenv("MAIN_CHANNEL_ID", 0))) or (bot.guilds[0].system_channel if bot.guilds else None)
+        if not target_ch:
+            return web.Response(text=json.dumps({"ok": False, "error": "لم يتم العثور على روم المحاكمة"}), content_type="application/json")
+
+        from main import CourtVoteView
+        embed = discord.Embed(
+            title=f"⚖️ {indictment.get('title', 'محكمة السيرفر العليا')}",
+            description=f"**المتهم في قفص الاتهام:** {member.mention}\n**التهمة المنسوبة إليه:** {charge}\n\n📜 **لائحة الادعاء:**\n{indictment.get('indictment', '')}\n\n⚖️ **العقوبة المقترحة:**\n{indictment.get('penalty', '')}",
+            color=0xff2a5f
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="جلسة محاكمة طارئة بدأت من لوحة التحكم • التصويت مفتوح 90 ثانية")
+
+        view = CourtVoteView(member.id, member.display_name, charge, bot)
+        await target_ch.send(content=f"🚨 **محاكمة علنية طارئة ضد {member.mention}!**", embed=embed, view=view)
+
+        return web.Response(text=json.dumps({"ok": True, "indictment": indictment}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_change_persona(request):
+async def handle_battle_judge(request):
+    """تحكيم معركة ذبات 1v1 بين شخصين بواسطة الذكاء الاصطناعي."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        persona = body.get("persona", "troll")
-        bot.current_persona = persona
-        return web.Response(text=json.dumps({"ok":True,"persona":persona}), content_type="application/json")
+        p1_name = body.get("p1_name", "المتحدي 1")
+        p1_roast = body.get("p1_roast", "")
+        p2_name = body.get("p2_name", "المتحدي 2")
+        p2_roast = body.get("p2_roast", "")
+        topic = body.get("topic", "نزاع حر")
+
+        if not p1_roast or not p2_roast:
+            return web.Response(text=json.dumps({"ok": False, "error": "يجب كتابة ذبة لكل من المتحديين"}), content_type="application/json")
+
+        result = await bot.roast_engine.judge_battle(p1_name, p1_roast, p2_name, p2_roast, topic=topic)
+        return web.Response(text=json.dumps({"ok": True, "result": result}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_voice_settings(request):
+async def handle_dialect_preview(request):
+    """توليد مقارنة فورية بين الـ 4 لهجات في نفس الوقت على موضوع محدد."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        if "join_allowed" in body:
-            bot.voice_join_allowed = bool(body["join_allowed"])
-        if "proactive_audio" in body:
-            bot.voice_proactive_audio = bool(body["proactive_audio"])
-        if "auto_leave_sec" in body:
-            bot.voice_auto_leave_sec = max(30, min(int(body["auto_leave_sec"]), 600))
-        if "ai_mode" in body:
-            bot.voice_ai_mode = body["ai_mode"]
-        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
+        topic = body.get("topic", "واحد سحب علينا بالرانك وجاء اليوم الثاني كأنه ما صار شيء").strip()
+        member_name = body.get("member_name", "العضو المستهدف").strip()
+
+        from main import generate_content_ai
+        prompt = get_comparative_prompt(topic, member_name)
+        resp = await generate_content_ai(contents=prompt)
+        text = resp.text.replace('```json', '').replace('```', '').strip()
+        comparisons = json.loads(text)
+        return web.Response(text=json.dumps({"ok": True, "comparisons": comparisons}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
-
-
-async def handle_voice_ignore(request):
-    bot = request.app["bot"]
-    try:
-        body = await request.json()
-        mid = int(body.get("member_id", 0)); action = body.get("action", "add")
-        if action == "add":
-            bot.voice_ignored_users.add(mid)
-        else:
-            bot.voice_ignored_users.discard(mid)
-        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
-
-
-async def handle_voice_kick(request):
-    bot = request.app["bot"]
-    try:
-        for gid, session in list(bot.voice_sessions.items()):
-            await session.stop(reason="طرد من الداشبورد")
-        return web.Response(text=json.dumps({"ok":True}), content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
-
-
-async def handle_voice_debug(request):
-    bot = request.app["bot"]
-    sessions = getattr(bot, "voice_sessions", {})
-    debug_data = {}
-    for gid, session in sessions.items():
-        if hasattr(session, "get_debug_info"):
-            debug_data[str(gid)] = session.get_debug_info()
-    if not debug_data:
-        debug_data["status"] = "no_active_session"
-    return web.Response(text=json.dumps(debug_data, ensure_ascii=False, default=str), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
 async def handle_ai_report(request):
+    """توليد تقرير الاستخبارات الساخر للمجلس."""
     bot = request.app["bot"]
     try:
-        from google import genai
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        from main import generate_content_ai
         stats = f"Online users in VC: {sum(len(vc.members) for g in bot.guilds for vc in g.voice_channels)}\n"
         stats += f"Total roasts: {sum(bot.roast_count_per_user.values())}\n"
-        shame = sorted(bot.roast_count_per_user.items(), key=lambda x:-x[1])[:3]
-        stats += f"Shame board top 3 max roasts: {shame}\n"
-        stats += f"Protected users: {len(bot.protected_users)}"
-        
+        shame = sorted(bot.roast_count_per_user.items(), key=lambda x: -x[1])[:3]
+        stats += f"Top 3 most roasted: {shame}\n"
+        stats += f"Protected users: {len(bot.protected_users)}\n"
+        stats += f"Active Dialect: {bot.current_dialect}"
+
         prompt = (
-            "أنت مستر ذبات. حلل إحصائيات الديسكورد التالية واكتب تقرير مسائي ساخر.\n"
+            "أنت مستر ذبات 3.0. حلل إحصائيات الديسكورد التالية واكتب تقرير مسائي ساخر جداً.\n"
             f"الإحصائيات: {stats}\n"
             "الناتج يجب أن يكون JSON فقط بالصيغة التالية بالضبط بدون أي نصوص أخرى:\n"
-            "{\"title\": \"عنوان التقرير\", \"toxic_user\": \"أكثر عضو انجلد\", \"quiet_user\": \"أصنم عضو (اختر عشوائيا اذا لم يوجد)\", \"summary\": \"ملخص ساخر للوضع سطرين\", \"advice\": \"نصيحة للإدمن\"}"
+            "{\"title\": \"عنوان التقرير الساخر\", \"toxic_user\": \"أكثر عضو مسكين انجلد\", \"quiet_user\": \"أصنم عضو بالسيرفر\", \"summary\": \"ملخص ساخر للوضع سطرين\", \"advice\": \"نصيحة ساخرة للإدمن\"}"
         )
-        response = await client.aio.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt,
-        )
+        response = await generate_content_ai(contents=prompt)
         text = response.text.replace('```json', '').replace('```', '').strip()
         data = json.loads(text)
-        return web.Response(text=json.dumps({"ok":True, "report": data}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": True, "report": data}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
-async def handle_build_persona(request):
-    bot = request.app["bot"]
-    try:
-        reader = await request.multipart()
-        field = await reader.next()
-        if field and field.name == 'image':
-            image_bytes = await field.read()
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-            prompt = (
-                "ابتكر شخصية مضحكة جداً أو قاسية لبوت ديسكورد بناءً على هذا الشكل/الصورة ليكون 'مستر ذبات' الجديد.\n"
-                "أعطني JSON يحتوي على:\n"
-                "1. name: اسم الشخصية القصير\n"
-                "2. prompt: الـ System Prompt التفصيلي للشخصية وطريقة كلامها باللهجة السعودية (سطرين)\n"
-                "3. voice: اختر الصوت الأنسب من (Kore, Aoede, Puck, Fenrir, Charon)\n"
-                "الرد يجب أن يكون بصيغة JSON فقط بدون نصوص إضافية."
-            )
-            response = await client.aio.models.generate_content(
-                model="gemini-flash-latest",
-                contents=[prompt, part],
-            )
-            text = response.text.replace('```json', '').replace('```', '').strip()
-            data = json.loads(text)
-            
-            bot.current_persona_custom = data.get("prompt", "شخصية جديدة")
-            bot.current_voice = data.get("voice", "Kore")
-            
-            return web.Response(text=json.dumps({"ok":True, "persona": data}), content_type="application/json")
-        return web.Response(text=json.dumps({"ok":False, "error":"No image"}), content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
-
-
-async def handle_start_minigame(request):
+async def handle_cli_execute(request):
+    """طرفية الأوامر السريعة Cyber CLI."""
     bot = request.app["bot"]
     try:
         body = await request.json()
-        game = body.get("type", "trivia")
-        prompts = {
-            "trivia": "اكتب سؤال تحدي معلومات صعب جدا عن الألعاب (Gaming) مع 4 خيارات، وخل كلامك بلهجة سعودية وتحدى الموجودين يجاوبون.",
-            "roast_battle": "أعلن في الشات عن بدء 'حلبة الذبات'. اطلب من الموجودين يكتبون ذباتهم واللي ذبته أقوى بيفوز، واستفزهم بلهجة سعودية.",
-            "math": "عطهم مسألة رياضيات معقدة شوي وقول أول واحد يحلها له جائزة، بلهجة سعودية مستفزة."
-        }
-        prompt = prompts.get(game, prompts["trivia"])
-        from google import genai
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        response = await client.aio.models.generate_content(
-            model="gemini-flash-latest", contents=prompt
-        )
-        # Fetch MAIN_CHANNEL_ID
-        ch = bot.get_channel(bot.get_channel(782986605148635166).guild.text_channels[0].id) # fallback
-        for guild in bot.guilds:
-            system = guild.system_channel or guild.text_channels[0]
-            if system:
-                ch = system
-                break
-        
-        # Override if main channel is known
-        import os
-        mc_id = int(os.getenv("MAIN_CHANNEL_ID", 0))
-        if mc_id: ch = bot.get_channel(mc_id)
-        
-        if ch:
-            await ch.send(f"🎮 **لعبة جديدة** 🎮\n{response.text.strip()}")
-            return web.Response(text='{"ok":true}', content_type="application/json")
-        return web.Response(text='{"ok":false, "error":"No channel"}', content_type="application/json")
+        cmd_raw = body.get("command", "").strip()
+        if not cmd_raw:
+            return web.Response(text=json.dumps({"ok": False, "output": "No command provided"}), content_type="application/json")
+
+        parts = cmd_raw.split()
+        root = parts[0].lower()
+
+        if root == "help":
+            output = (
+                "=== MR. ROAST OS 3.0 CYBER CLI COMMANDS ===\n"
+                "• stats                     - عرض إحصائيات السيرفر السريعة\n"
+                "• roast <id> [topic]        - إطلاق ذبة فورية على عضو محدد\n"
+                "• court <id> <charge>       - فتح محاكمة طارئة ضد عضو في الديسكورد\n"
+                "• shamecard <id>            - إصدار وإرسال بطاقة عار لعضو\n"
+                "• dialect <default|riyadh|jeddah|qassim> - تغيير اللهجة النشطة\n"
+                "• protect <id>              - إضافة عضو لقائمة الحماية\n"
+                "• unprotect <id>            - إزالة عضو من الحماية\n"
+                "• loop <on|off>             - تشغيل/إيقاف محرك القصف التلقائي\n"
+                "• purge                     - تفريغ سجل الذبات المؤقت\n"
+                "• clear                     - مسح الشاشة"
+            )
+            return web.Response(text=json.dumps({"ok": True, "output": output}), content_type="application/json")
+
+        elif root == "stats":
+            total_r = sum(bot.roast_count_per_user.values())
+            uptime = int((time.time() - bot._start_time) / 60)
+            output = (
+                f"SYS STATUS: ONLINE | LOOP: {'ACTIVE' if bot.roast_loop.is_running() else 'OFFLINE'}\n"
+                f"UPTIME: {uptime} mins | TOTAL ROASTS: {total_r}\n"
+                f"ACTIVE DIALECT: {bot.current_dialect.upper()} ({DIALECTS.get(bot.current_dialect, {}).get('name')})\n"
+                f"PROTECTED TARGETS: {len(bot.protected_users)}"
+            )
+            return web.Response(text=json.dumps({"ok": True, "output": output}), content_type="application/json")
+
+        elif root == "dialect":
+            if len(parts) > 1 and parts[1] in DIALECTS:
+                bot.current_dialect = parts[1]
+                bot.save_data()
+                return web.Response(text=json.dumps({"ok": True, "output": f"SUCCESS: Dialect set to [{DIALECTS[parts[1]]['name']}]"}), content_type="application/json")
+            return web.Response(text=json.dumps({"ok": False, "output": "USAGE: dialect <default|riyadh|jeddah|qassim>"}), content_type="application/json")
+
+        elif root == "loop":
+            if len(parts) > 1:
+                action = parts[1].lower()
+                if action == "on" and not bot.roast_loop.is_running():
+                    bot.roast_loop.start()
+                elif action == "off" and bot.roast_loop.is_running():
+                    bot.roast_loop.cancel()
+                return web.Response(text=json.dumps({"ok": True, "output": f"Roast loop state: {bot.roast_loop.is_running()}"}), content_type="application/json")
+            return web.Response(text=json.dumps({"ok": False, "output": "USAGE: loop <on|off>"}), content_type="application/json")
+
+        elif root == "protect":
+            if len(parts) > 1:
+                uid = int(parts[1].replace("<@", "").replace(">", "").strip())
+                bot.protected_users.add(uid)
+                return web.Response(text=json.dumps({"ok": True, "output": f"TARGET [{uid}] ADDED TO VIP IMMUNITY."}), content_type="application/json")
+            return web.Response(text=json.dumps({"ok": False, "output": "USAGE: protect <user_id>"}), content_type="application/json")
+
+        elif root == "unprotect":
+            if len(parts) > 1:
+                uid = int(parts[1].replace("<@", "").replace(">", "").strip())
+                bot.protected_users.discard(uid)
+                return web.Response(text=json.dumps({"ok": True, "output": f"TARGET [{uid}] REMOVED FROM IMMUNITY."}), content_type="application/json")
+            return web.Response(text=json.dumps({"ok": False, "output": "USAGE: unprotect <user_id>"}), content_type="application/json")
+
+        elif root == "purge":
+            bot.roast_log.clear()
+            bot.save_data()
+            return web.Response(text=json.dumps({"ok": True, "output": "SYSTEM LOG PURGED."}), content_type="application/json")
+
+        elif root == "roast":
+            if len(parts) > 1:
+                uid = int(parts[1].replace("<@", "").replace(">", "").strip())
+                topic = " ".join(parts[2:]) if len(parts) > 2 else None
+                ok = await bot.targeted_roast(uid, topic=topic)
+                return web.Response(text=json.dumps({"ok": ok, "output": f"STRIKE EXECUTED on target [{uid}]" if ok else "STRIKE FAILED (target not found)"}), content_type="application/json")
+            return web.Response(text=json.dumps({"ok": False, "output": "USAGE: roast <user_id> [topic]"}), content_type="application/json")
+
+        else:
+            return web.Response(text=json.dumps({"ok": False, "output": f"COMMAND NOT RECOGNIZED: '{root}'. Type 'help' for instructions."}), content_type="application/json")
+
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "output": f"EXECUTION ERROR: {str(e)}"}), content_type="application/json")
 
 
-async def handle_soundboard(request):
-    bot = request.app["bot"]
-    try:
-        body = await request.json()
-        effect = body.get("effect")
-        prompts = {
-            "laugh": "hahahaha HAHAHAHA! hahahaha!",
-            "scream": "Aaaaaaaaaahhhhhh!",
-            "bruh": "Bruh.",
-            "sigh": "Ugh. Sigh."
-        }
-        text = prompts.get(effect, "Hello")
-        
-        target_member = None
-        for g in bot.guilds:
-            for vc in g.voice_channels:
-                if len([m for m in vc.members if not m.bot]) > 0:
-                    target_member = [m for m in vc.members if not m.bot][0]
-                    break
-            if target_member: break
-            
-        if target_member:
-            import asyncio
-            asyncio.create_task(bot.play_tts_in_voice(target_member, text))
-            return web.Response(text='{"ok":true}', content_type="application/json")
-        return web.Response(text='{"ok":false, "error":"لا يوجد أحد في الفويس"}', content_type="application/json")
-    except Exception as e:
-        return web.Response(text=json.dumps({"ok":False, "error":str(e)}), content_type="application/json")
-
-# ─── HTML ────────────────────────────────────────────────────────────────
+# ─── FRONTEND HTML (QUANTUM CYBER DECK 3.0) ──────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>مستر ذبات – لوحة التحكم</title>
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>مستر ذبات 3.0 • QUANTUM CYBER DECK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-:root{
-  --bg:#0a0e14;--bg2:#111820;--card:#161d27;--card2:#1a2332;
-  --border:#1e2a3a;--border-h:#2a3a4d;
-  --accent:#f43f5e;--accent2:#fb7185;--accent-bg:rgba(244,63,94,.08);
-  --green:#22c55e;--green-bg:rgba(34,197,94,.1);
-  --yellow:#eab308;--yellow-bg:rgba(234,179,8,.1);
-  --blue:#3b82f6;--blue-bg:rgba(59,130,246,.1);
-  --purple:#a855f7;--purple-bg:rgba(168,85,247,.1);
-  --cyan:#06b6d4;--cyan-bg:rgba(6,182,212,.1);
-  --text:#e8edf4;--muted:#6b7a8d;--dim:#3d4f63;
+:root {
+  --bg-deep: #06090e;
+  --bg-surface: #0c121b;
+  --bg-card: rgba(16, 25, 38, 0.75);
+  --bg-card-hover: rgba(22, 35, 54, 0.85);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-glow: rgba(0, 240, 255, 0.3);
+  
+  --cyan: #00f0ff;
+  --cyan-dim: rgba(0, 240, 255, 0.12);
+  --magenta: #ff0055;
+  --magenta-dim: rgba(255, 0, 85, 0.15);
+  --amber: #ffb703;
+  --amber-dim: rgba(255, 183, 3, 0.12);
+  --emerald: #00ff88;
+  --emerald-dim: rgba(0, 255, 136, 0.12);
+  --purple: #a855f7;
+  --purple-dim: rgba(168, 85, 247, 0.15);
+
+  --text-main: #f0f6fc;
+  --text-muted: #8b949e;
+  --text-dim: #484f58;
+
+  --font-arabic: 'Cairo', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --glass: blur(16px);
 }
-.light{
-  --bg:#f0f2f5;--bg2:#fff;--card:#fff;--card2:#f8f9fa;
-  --border:#e0e4ea;--border-h:#c8d0dc;
-  --text:#1a1a2e;--muted:#64748b;--dim:#94a3b8;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg-deep);
+  color: var(--text-main);
+  font-family: var(--font-arabic);
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;transition:background .3s,color .3s}
 
-/* Header */
-.header{background:linear-gradient(135deg,rgba(244,63,94,.05),rgba(168,85,247,.05));
-  border-bottom:1px solid var(--border);padding:1rem 2rem;
-  display:flex;align-items:center;gap:1rem;position:sticky;top:0;z-index:50;
-  backdrop-filter:blur(20px);transition:background .3s}
-.header img{width:44px;height:44px;border-radius:50%;border:2px solid var(--accent);box-shadow:0 0 16px rgba(244,63,94,.25)}
-.header .title{font-size:1.3rem;font-weight:900;background:linear-gradient(135deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header .sub{color:var(--muted);font-size:.78rem}
-.header-actions{margin-right:auto;display:flex;gap:.5rem;align-items:center}
-.theme-btn{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.4rem .7rem;cursor:pointer;font-size:1rem;color:var(--text);transition:all .2s}
-.theme-btn:hover{border-color:var(--accent)}
+/* Background Canvas */
+#cyberCanvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.55;
+}
 
-.container{max-width:1500px;margin:0 auto;padding:1.5rem}
+/* Top App Bar */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(6, 9, 14, 0.85);
+  backdrop-filter: var(--glass);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 0.75rem 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.brand-box {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+.brand-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 2px solid var(--cyan);
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+  object-fit: cover;
+}
+.brand-titles h1 {
+  font-size: 1.25rem;
+  font-weight: 900;
+  background: linear-gradient(135deg, #fff, var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.version-badge {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  border: 1px solid var(--cyan);
+  padding: 2px 6px;
+  border-radius: 6px;
+  letter-spacing: 1px;
+}
+.brand-titles p {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
 
-/* Tabs */
-.tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;overflow-x:auto;padding-bottom:.5rem}
-.tab{padding:.5rem 1.2rem;border-radius:10px;font-weight:700;font-size:.82rem;cursor:pointer;
-  background:var(--card);border:1px solid var(--border);color:var(--muted);transition:all .2s;white-space:nowrap}
-.tab:hover{border-color:var(--border-h);color:var(--text)}
-.tab.active{background:var(--accent-bg);border-color:var(--accent);color:var(--accent)}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.chip-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  transition: all 0.2s ease;
+  font-family: var(--font-arabic);
+}
+.chip-btn:hover {
+  border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+  transform: translateY(-1px);
+}
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--emerald);
+  box-shadow: 0 0 8px var(--emerald);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.3); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
 
-/* Page */
-.page{display:none;animation:fadeIn .3s ease}
-.page.active{display:block}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+/* Nav Tabs */
+.nav-tabs-wrapper {
+  position: sticky;
+  top: 61px;
+  z-index: 90;
+  background: rgba(8, 12, 18, 0.92);
+  backdrop-filter: var(--glass);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 2rem;
+  overflow-x: auto;
+}
+.nav-tabs {
+  display: flex;
+  gap: 0.5rem;
+  min-width: max-content;
+}
+.nav-tab {
+  padding: 0.85rem 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+}
+.nav-tab:hover {
+  color: var(--text-main);
+}
+.nav-tab.active {
+  color: var(--cyan);
+  border-bottom-color: var(--cyan);
+  text-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+}
 
-/* Stats */
-.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:1.5rem}
-.stat-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1rem;display:flex;align-items:center;gap:.8rem;transition:all .2s}
-.stat-card:hover{border-color:var(--border-h);transform:translateY(-2px)}
-.stat-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.3rem}
-.stat-icon.red{background:var(--accent-bg)}.stat-icon.green{background:var(--green-bg)}
-.stat-icon.blue{background:var(--blue-bg)}.stat-icon.purple{background:var(--purple-bg)}
-.stat-icon.cyan{background:var(--cyan-bg)}.stat-icon.yellow{background:var(--yellow-bg)}
-.stat-value{font-size:1.5rem;font-weight:900}
-.stat-label{font-size:.72rem;color:var(--muted)}
+/* Main Layout */
+.container {
+  position: relative;
+  z-index: 10;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1.75rem 2rem 4rem;
+}
+.tab-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.tab-content.active {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
-/* Grid */
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
-.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1.5rem}
-@media(max-width:1100px){.grid3{grid-template-columns:1fr 1fr}}
-@media(max-width:800px){.grid,.grid3{grid-template-columns:1fr}}
-.full{grid-column:1/-1}
+/* Glass Cards */
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: var(--glass);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 1.5rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.glass-card:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+.glass-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.3), transparent);
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+.card-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
 
-/* Card */
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;transition:all .2s}
-.card:hover{border-color:var(--border-h)}
-.card-head{padding:.9rem 1.1rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.card-head h2{font-size:.92rem;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:.4rem}
-.card-body{padding:1.1rem;max-height:420px;overflow-y:auto}
-.card-body::-webkit-scrollbar{width:3px}
-.card-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+/* HUD Metric Cards Grid */
+.hud-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.75rem;
+}
+.metric-card {
+  padding: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.metric-icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6rem;
+}
+.metric-val {
+  font-size: 1.85rem;
+  font-weight: 900;
+  font-family: var(--font-mono);
+  line-height: 1.1;
+}
+.metric-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-top: 0.2rem;
+}
 
-/* Badge */
-.badge{display:inline-flex;align-items:center;gap:.2rem;padding:.12rem .55rem;border-radius:20px;font-size:.7rem;font-weight:600}
-.badge-green{background:var(--green-bg);color:var(--green)}
-.badge-red{background:var(--accent-bg);color:var(--accent)}
-.badge-yellow{background:var(--yellow-bg);color:var(--yellow)}
-.badge-blue{background:var(--blue-bg);color:var(--blue)}
-.badge-purple{background:var(--purple-bg);color:var(--purple)}
-.badge-cyan{background:var(--cyan-bg);color:var(--cyan)}
+/* Fast Action Bar */
+.action-strip {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.75rem;
+}
+.cyber-btn {
+  background: linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(0, 240, 255, 0.05));
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  padding: 0.75rem 1.4rem;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-family: var(--font-arabic);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.15);
+}
+.cyber-btn:hover {
+  background: var(--cyan);
+  color: #000;
+  box-shadow: 0 0 25px rgba(0, 240, 255, 0.5);
+  transform: translateY(-2px);
+}
+.cyber-btn.danger {
+  background: linear-gradient(135deg, rgba(255, 0, 85, 0.15), rgba(255, 0, 85, 0.05));
+  border-color: var(--magenta);
+  color: var(--magenta);
+  box-shadow: 0 0 15px rgba(255, 0, 85, 0.15);
+}
+.cyber-btn.danger:hover {
+  background: var(--magenta);
+  color: #fff;
+  box-shadow: 0 0 25px rgba(255, 0, 85, 0.5);
+}
+.cyber-btn.purple {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(168, 85, 247, 0.05));
+  border-color: var(--purple);
+  color: var(--purple);
+  box-shadow: 0 0 15px rgba(168, 85, 247, 0.15);
+}
+.cyber-btn.purple:hover {
+  background: var(--purple);
+  color: #fff;
+  box-shadow: 0 0 25px rgba(168, 85, 247, 0.5);
+}
 
-/* Members */
-.member{display:flex;align-items:center;gap:.7rem;padding:.7rem 0;border-bottom:1px solid var(--border);transition:background .2s}
-.member:last-child{border-bottom:none}
-.member:hover{background:rgba(255,255,255,.02)}
-.member-avatar{position:relative}
-.member-avatar img{width:38px;height:38px;border-radius:50%;border:2px solid var(--border)}
-.status-dot{position:absolute;bottom:0;right:0;width:11px;height:11px;border-radius:50%;border:2px solid var(--card)}
-.status-online{background:var(--green)}.status-idle{background:var(--yellow)}.status-dnd{background:var(--accent)}.status-offline{background:var(--dim)}
-.member-info{flex:1;min-width:0}
-.member-name{font-weight:700;font-size:.85rem;display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}
-.member-meta{color:var(--muted);font-size:.72rem;display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.1rem}
+/* Two Column Layout */
+.layout-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+@media (max-width: 1024px) {
+  .layout-2col { grid-template-columns: 1fr; }
+}
 
-/* Shame board */
-.shame-item{display:flex;align-items:center;gap:.7rem;padding:.6rem 0;border-bottom:1px solid var(--border)}
-.shame-item:last-child{border-bottom:none}
-.shame-rank{font-size:1.1rem;font-weight:900;width:28px;text-align:center}
-.shame-rank.gold{color:#fbbf24}.shame-rank.silver{color:#94a3b8}.shame-rank.bronze{color:#d97706}
-.shame-count{margin-right:auto;font-weight:900;color:var(--accent);font-size:.9rem}
+/* Voice Chamber Radar */
+.vc-members-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+.member-radar-card {
+  background: rgba(12, 18, 27, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  transition: all 0.2s;
+}
+.member-radar-card:hover {
+  border-color: var(--border-glow);
+  background: rgba(16, 25, 38, 0.9);
+}
+.member-radar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.member-radar-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.member-radar-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--border-subtle);
+}
+.member-radar-name {
+  font-weight: 800;
+  font-size: 0.95rem;
+}
+.member-radar-title {
+  font-size: 0.75rem;
+  color: var(--cyan);
+}
+.badges-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.badge-chip {
+  font-size: 0.7rem;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-weight: 600;
+}
+.badge-muted { background: var(--magenta-dim); color: var(--magenta); border: 1px solid rgba(255, 0, 85, 0.3); }
+.badge-deaf { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-stream { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(168, 85, 247, 0.3); }
+.badge-game { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(0, 240, 255, 0.3); }
 
-/* Roasts */
-.roast-item{padding:.65rem 0;border-bottom:1px solid var(--border)}
-.roast-item:last-child{border-bottom:none}
-.roast-head{display:flex;align-items:center;gap:.4rem}
-.roast-name{color:var(--accent);font-weight:700;font-size:.8rem}
-.roast-time{color:var(--dim);font-size:.7rem}
-.roast-text{color:var(--text);font-size:.82rem;margin-top:.25rem;line-height:1.6;padding:.4rem .7rem;background:var(--card2);border-radius:8px;border-right:3px solid var(--accent)}
+/* Live Feeds */
+.feed-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-left: 0.5rem;
+}
+.feed-item {
+  background: rgba(12, 18, 27, 0.5);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.feed-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.feed-member {
+  font-weight: 800;
+  color: var(--amber);
+}
+.feed-roast-text {
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
 
-/* Buttons */
-.btn{padding:.5rem 1.1rem;border:1px solid var(--border);border-radius:10px;font-family:'Cairo',sans-serif;font-weight:700;font-size:.82rem;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:.3rem;background:var(--card2);color:var(--text)}
-.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.3)}
-.btn-red{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn-green{background:var(--green);border-color:var(--green);color:#fff}
-.btn-yellow{border-color:var(--yellow);color:var(--yellow)}
-.btn-blue{border-color:var(--blue);color:var(--blue)}
-.btn-sm{padding:.35rem .8rem;font-size:.75rem}
-.controls{display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:.8rem}
+/* 3D Shame Card Hologram Studio */
+.shame-studio-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 2rem;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .shame-studio-grid { grid-template-columns: 1fr; }
+}
 
-/* Forms */
-.form-group{margin-bottom:.8rem}
-.form-group label{font-size:.75rem;color:var(--muted);margin-bottom:.2rem;display:block}
-select,textarea,input[type=text],input[type=number]{background:var(--bg2);border:1px solid var(--border);border-radius:10px;
-  padding:.6rem .9rem;color:var(--text);font-family:'Cairo',sans-serif;font-size:.82rem;outline:none;transition:border .2s;width:100%}
-select:focus,textarea:focus,input:focus{border-color:var(--accent)}
-textarea{resize:none;min-height:70px}
-input[type=range]{width:100%;accent-color:var(--accent)}
+.holo-card-viewport {
+  perspective: 1000px;
+  display: flex;
+  justify-content: center;
+}
+.holo-card {
+  width: 320px;
+  background: linear-gradient(145deg, #101622, #080c14);
+  border: 2px solid var(--purple);
+  box-shadow: 0 0 35px rgba(168, 85, 247, 0.25);
+  border-radius: 20px;
+  padding: 1.5rem;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+  transform-style: preserve-3d;
+}
+.holo-card::before {
+  content: '';
+  position: absolute;
+  inset: -100%;
+  background: linear-gradient(45deg, transparent 40%, rgba(255, 255, 255, 0.12) 50%, transparent 60%);
+  pointer-events: none;
+  transform: rotate(35deg);
+}
+.holo-avatar-wrap {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 1rem;
+}
+.holo-avatar {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 3px solid var(--purple);
+}
+.holo-name {
+  text-align: center;
+  font-size: 1.25rem;
+  font-weight: 900;
+}
+.holo-title {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--cyan);
+  margin-bottom: 1.25rem;
+}
+.holo-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+  margin-bottom: 1.25rem;
+}
+.holo-stat-box {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 0.6rem;
+  text-align: center;
+}
+.holo-stat-val {
+  font-size: 1.15rem;
+  font-weight: 900;
+  font-family: var(--font-mono);
+  color: var(--amber);
+}
+.holo-stat-lbl {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.holo-quote {
+  background: rgba(168, 85, 247, 0.1);
+  border-right: 3px solid var(--purple);
+  padding: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-style: italic;
+  line-height: 1.4;
+  color: #fff;
+  min-height: 60px;
+}
 
-/* Game bars */
-.game-bar{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem}
-.game-bar .name{font-size:.8rem;min-width:100px;text-align:left}
-.game-bar .bar{flex:1;height:22px;background:var(--bg2);border-radius:6px;overflow:hidden;position:relative}
-.game-bar .fill{height:100%;border-radius:6px;transition:width .5s ease}
-.game-bar .count{font-size:.72rem;color:var(--muted);min-width:30px;text-align:center}
+/* Courtroom Tab */
+.court-banner {
+  background: linear-gradient(135deg, rgba(255, 0, 85, 0.15), rgba(168, 85, 247, 0.1));
+  border: 1px solid var(--magenta);
+  border-radius: 16px;
+  padding: 2rem;
+  margin-bottom: 2rem;
+  text-align: center;
+  position: relative;
+}
+.court-banner h2 {
+  font-size: 2rem;
+  font-weight: 900;
+  color: #fff;
+  margin-bottom: 0.5rem;
+}
+.court-banner p {
+  color: var(--text-muted);
+  max-width: 600px;
+  margin: 0 auto;
+}
 
-/* Toast */
-.toast-container{position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:999;display:flex;flex-direction:column;gap:.5rem}
-.toast{background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:.7rem 1.2rem;
-  font-size:.82rem;box-shadow:0 8px 30px rgba(0,0,0,.4);animation:slideIn .3s ease,fadeOut .3s ease 3s forwards;
-  display:flex;align-items:center;gap:.5rem}
-@keyframes slideIn{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}
-@keyframes fadeOut{to{opacity:0;transform:translateY(-10px)}}
+/* 1v1 Battle Arena */
+.battle-ring {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 1.5rem;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+@media (max-width: 800px) {
+  .battle-ring { grid-template-columns: 1fr; }
+}
+.versus-badge {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--magenta);
+  box-shadow: 0 0 25px rgba(255, 0, 85, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  color: #fff;
+  margin: 0 auto;
+}
 
-.empty{color:var(--dim);font-size:.82rem;text-align:center;padding:1.5rem}
-.empty-icon{font-size:1.8rem;margin-bottom:.4rem}
+/* Dialects Cards */
+.dialect-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+.dialect-card {
+  cursor: pointer;
+  position: relative;
+}
+.dialect-card.selected {
+  border-color: var(--cyan);
+  box-shadow: 0 0 25px rgba(0, 240, 255, 0.3);
+}
+.metric-bar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+.metric-bar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.metric-bar-track {
+  width: 120px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.metric-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--cyan);
+}
 
-/* Chart container */
-.chart-box{position:relative;height:200px}
+/* 4-Way Simulator */
+.comparative-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.25rem;
+  margin-top: 1.5rem;
+}
+.sim-card {
+  background: rgba(12, 18, 27, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 1.25rem;
+  min-height: 140px;
+}
+.sim-card-header {
+  font-weight: 800;
+  font-size: 0.95rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 
-/* Hourly chart */
-.hourly-bars{display:flex;align-items:flex-end;gap:3px;height:120px;padding:0 .2rem}
-.hourly-bar{flex:1;border-radius:3px 3px 0 0;transition:height .5s;min-width:8px;position:relative}
-.hourly-bar:hover{opacity:.8}
-.hourly-label{font-size:.55rem;color:var(--dim);text-align:center;margin-top:2px}
+/* Cyber CLI Slide-Out */
+#cyberCliModal {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  width: 480px;
+  max-width: 90vw;
+  height: 380px;
+  background: rgba(6, 10, 16, 0.95);
+  backdrop-filter: var(--glass);
+  border: 1px solid var(--cyan);
+  box-shadow: 0 0 35px rgba(0, 240, 255, 0.25);
+  border-radius: 12px;
+  z-index: 200;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-mono);
+}
+.cli-header {
+  background: rgba(0, 240, 255, 0.1);
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(0, 240, 255, 0.2);
+  font-size: 0.8rem;
+  color: var(--cyan);
+}
+.cli-body {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #7ee787;
+  white-space: pre-wrap;
+}
+.cli-input-line {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: rgba(0, 0, 0, 0.4);
+  border-top: 1px solid var(--border-subtle);
+}
+.cli-prompt {
+  color: var(--cyan);
+  margin-left: 0.5rem;
+}
+.cli-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  outline: none;
+}
 
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.pulse{animation:pulse 2s ease-in-out infinite}
+/* Inputs & Form Elements */
+.input-control {
+  width: 100%;
+  background: rgba(12, 18, 27, 0.7);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  color: #fff;
+  font-family: var(--font-arabic);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.input-control:focus {
+  border-color: var(--cyan);
+}
+select.input-control option {
+  background: #0d131d;
+  color: #fff;
+}
+textarea.input-control {
+  resize: vertical;
+  min-height: 80px;
+}
 
-/* Dialects */
-.dialect-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.8rem;margin-top:.6rem}
-.dialect-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1rem;cursor:pointer;transition:all .2s;position:relative}
-.dialect-card:hover{border-color:var(--accent);transform:translateY(-2px)}
-.dialect-card.active{border-color:var(--accent);background:linear-gradient(135deg,rgba(244,63,94,.12),rgba(168,85,247,.12));box-shadow:0 0 16px rgba(244,63,94,.25)}
-.dialect-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem}
-.dialect-name{font-weight:700;font-size:.9rem;display:flex;align-items:center;gap:.4rem}
-.dialect-badge{font-size:.68rem;padding:.12rem .5rem;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--muted)}
-.dialect-desc{font-size:.74rem;color:var(--muted);line-height:1.4}
-.dialect-quote{font-size:.72rem;color:var(--accent2);margin-top:.4rem;background:rgba(255,255,255,.03);padding:.25rem .5rem;border-radius:6px;border-right:2px solid var(--accent)}
-.dialect-active-indicator{position:absolute;top:-8px;left:10px;background:var(--accent);color:#fff;font-size:.65rem;font-weight:700;padding:.1rem .5rem;border-radius:10px;display:none}
-.dialect-card.active .dialect-active-indicator{display:block}
+/* Toast System */
+#toastHost {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+.toast {
+  background: rgba(16, 25, 38, 0.95);
+  backdrop-filter: var(--glass);
+  border: 1px solid var(--border-subtle);
+  color: #fff;
+  padding: 0.75rem 1.25rem;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: slideIn 0.3s ease;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.toast.success { border-color: var(--emerald); }
+.toast.danger { border-color: var(--magenta); }
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
 
-/* Dossier Modal */
-.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(5px);z-index:1000;display:none;align-items:center;justify-content:center;padding:1rem}
-.modal-backdrop.open{display:flex}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;max-width:540px;width:100%;max-height:85vh;overflow-y:auto;box-shadow:0 20px 40px rgba(0,0,0,.5);animation:fadeIn .2s ease}
-.modal-head{padding:1rem 1.3rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.modal-body{padding:1.3rem}
-.dossier-tag{display:inline-block;padding:.2rem .6rem;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:.75rem;margin:.2rem}
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
 </style>
 </head>
 <body>
 
-<div class="toast-container" id="toasts"></div>
+<!-- Interactive Particle Neural Background -->
+<canvas id="cyberCanvas"></canvas>
 
-<div class="header">
-  <img id="bot-avatar" src="" alt="">
-  <div>
-    <div class="title" id="bot-name">مستر ذبات 🔥</div>
-    <div class="sub" id="loop-status">جاري التحميل...</div>
+<!-- Top App Bar -->
+<header class="topbar">
+  <div class="brand-box">
+    <img id="botAvatar" class="brand-avatar" src="" alt="Bot">
+    <div class="brand-titles">
+      <h1>
+        <span id="botName">مستر ذبات</span>
+        <span class="version-badge">OS 3.0</span>
+      </h1>
+      <p id="serverInfo">جاري الاتصال بالسيرفر...</p>
+    </div>
   </div>
-  <div class="header-actions">
-    <span id="header-dialect" class="badge badge-purple" style="font-size:.76rem;padding:.35rem .7rem;cursor:pointer" onclick="showPage('control')" title="اضغط لتغيير اللهجة">🗣️ عامية</span>
-    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙</button>
+
+  <div class="topbar-actions">
+    <button class="chip-btn" id="sfxToggleBtn" onclick="toggleAudioSFX()">
+      <span id="sfxIcon">🔊</span>
+      <span>مؤثرات الصوت: مفعّلة</span>
+    </button>
+    <button class="chip-btn" onclick="toggleCliModal()">
+      <span>>_</span>
+      <span>Cyber CLI</span>
+    </button>
+    <div class="chip-btn">
+      <div class="pulse-dot"></div>
+      <span id="loopStatusText">المحرك: نشط</span>
+    </div>
   </div>
+</header>
+
+<!-- Navigation Tabs -->
+<div class="nav-tabs-wrapper">
+  <nav class="nav-tabs">
+    <div class="nav-tab active" onclick="switchTab('tactical', this)">🛰️ العمليات التكتيكية</div>
+    <div class="nav-tab" onclick="switchTab('shamecard', this)">🎴 استوديو بطاقات العار</div>
+    <div class="nav-tab" onclick="switchTab('courtroom', this)">⚖️ محكمة السيرفر</div>
+    <div class="nav-tab" onclick="switchTab('battle', this)">⚔️ حلبة المواجهات 1v1</div>
+    <div class="nav-tab" onclick="switchTab('dialects', this)">🗣️ مختبر اللهجات الـ 4</div>
+    <div class="nav-tab" onclick="switchTab('dossiers', this)">🗄️ أرشيف السوابق والفضائح</div>
+    <div class="nav-tab" onclick="switchTab('analytics', this)">📊 الرادار والتحليلات</div>
+  </nav>
 </div>
 
-<div class="container">
-  <!-- Tabs -->
-  <div class="tabs">
-    <div class="tab active" onclick="showPage('overview')">📊 نظرة عامة</div>
-    <div class="tab" onclick="showPage('control')">🕹️ التحكم</div>
-    <div class="tab" onclick="showPage('voice')">🎤 المحادثة الصوتية</div>
-    <div class="tab" onclick="showPage('roasts')">🔥 الذبات</div>
-    <div class="tab" onclick="showPage('analytics')">📈 التحليلات</div>
-    <div class="tab" onclick="showPage('members')">👥 الأعضاء</div>
-    <div class="tab" onclick="showPage('debug')">🔧 Debug</div>
-  </div>
+<!-- Main Content Container -->
+<main class="container">
 
-  <!-- ═══ PAGE: OVERVIEW ═══ -->
-  <div class="page active" id="page-overview">
-    <div class="stats-row">
-      <div class="stat-card"><div class="stat-icon red">🎯</div><div><div class="stat-value" id="s-roasts">0</div><div class="stat-label">ذبة إجمالي</div></div></div>
-      <div class="stat-card"><div class="stat-icon green">🎧</div><div><div class="stat-value" id="s-vc">0</div><div class="stat-label">بالفويس الحين</div></div></div>
-      <div class="stat-card"><div class="stat-icon blue">⏱️</div><div><div class="stat-value" id="s-mins">0</div><div class="stat-label">دقيقة فويس</div></div></div>
-      <div class="stat-card"><div class="stat-icon purple">👥</div><div><div class="stat-value" id="s-online">0</div><div class="stat-label">أونلاين</div></div></div>
-      <div class="stat-card"><div class="stat-icon cyan">⏳</div><div><div class="stat-value" id="s-uptime">0</div><div class="stat-label">دقيقة شغّال</div></div></div>
-      <div class="stat-card"><div class="stat-icon yellow">⏭️</div><div><div class="stat-value" id="s-next">—</div><div class="stat-label">الذبة الجاية</div></div></div>
-    </div>
-
-    <!-- Quick Dialect Bar in Overview -->
-    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:.8rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.8rem">
-      <div style="display:flex;align-items:center;gap:.6rem">
-        <span style="font-size:1.3rem">🗣️</span>
+  <!-- ================= TAB 1: TACTICAL OPERATIONS ================= -->
+  <section id="tab-tactical" class="tab-content active">
+    <!-- HUD Metrics -->
+    <div class="hud-grid">
+      <div class="glass-card metric-card">
+        <div class="metric-icon-box" style="background:var(--magenta-dim); color:var(--magenta);">🎯</div>
         <div>
-          <div style="font-weight:700;font-size:.88rem">اللهجة التلقائية الحالية: <span id="ov-dialect-name" style="color:var(--accent);font-weight:900">عامية</span></div>
-          <div style="font-size:.72rem;color:var(--muted)">تحدد أسلوب ومفردات الذبات والمحادثات الصوتية فوراً</div>
+          <div class="metric-val" id="hudTotalRoasts">0</div>
+          <div class="metric-label">إجمالي القصف والذبات</div>
         </div>
       </div>
-      <div style="display:flex;gap:.4rem;flex-wrap:wrap" id="ov-dialect-btns">
-        <button class="btn btn-sm" onclick="changeDialect('default')" id="btn-dial-default">⚡ عامية</button>
-        <button class="btn btn-sm" onclick="changeDialect('riyadh')" id="btn-dial-riyadh">🇸🇦 الرياض</button>
-        <button class="btn btn-sm" onclick="changeDialect('jeddah')" id="btn-dial-jeddah">🌴 جدة</button>
-        <button class="btn btn-sm" onclick="changeDialect('qassim')" id="btn-dial-qassim">🌾 القصيم</button>
+      <div class="glass-card metric-card">
+        <div class="metric-icon-box" style="background:var(--cyan-dim); color:var(--cyan);">🎙️</div>
+        <div>
+          <div class="metric-val" id="hudActiveVc">0</div>
+          <div class="metric-label">الأهداف في الفويس الآن</div>
+        </div>
       </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>🎧 بالفويس الحين</h2><span class="badge badge-green" id="vc-count">0</span></div>
-        <div class="card-body" id="members-list"><div class="empty"><div class="empty-icon">🔇</div>لا أحد</div></div>
+      <div class="glass-card metric-card">
+        <div class="metric-icon-box" style="background:var(--amber-dim); color:var(--amber);">⚡</div>
+        <div>
+          <div class="metric-val" id="hudCurrentDialect">-</div>
+          <div class="metric-label">اللهجة النشطة الرسمية</div>
+        </div>
       </div>
-      <div class="card">
-        <div class="card-head"><h2>🏆 جدار العار والحقد</h2></div>
-        <div class="card-body" id="shame-list"><div class="empty"><div class="empty-icon">😇</div>ما فيه ضحايا بعد</div></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ PAGE: CONTROL ═══ -->
-  <div class="page" id="page-control">
-    <!-- Dialect Selector Card -->
-    <div class="card full" style="margin-bottom:1.5rem">
-      <div class="card-head">
-        <h2>🗣️ اختيار لهجة البوت التلقائية (Dialect Control)</h2>
-        <span class="badge badge-purple" id="ctrl-dialect-badge">عامية</span>
-      </div>
-      <div class="card-body">
-        <p style="font-size:.8rem;color:var(--muted);margin-bottom:.5rem">
-          اختر اللهجة التي سيعتمدها البوت في الذبات التلقائية والردود الصوتية. اضغط على أي بطاقة لتفعيلها فوراً:
-        </p>
-        <div class="dialect-grid" id="dialect-grid"></div>
-      </div>
-    </div>
-
-    <!-- Smart Roast Launcher -->
-    <div class="card full" style="margin-bottom:1.5rem">
-      <div class="card-head">
-        <h2>🚀 منصة إطلاق الذبات الذكية (Smart Roast Launcher)</h2>
-        <span class="badge badge-red">Gemini Thinking High 🔥</span>
-      </div>
-      <div class="card-body">
-        <div class="grid" style="grid-template-columns:1fr 1fr;gap:1.2rem">
-          <div>
-            <div class="form-group">
-              <label>🎯 الضحية المستهدفة</label>
-              <select id="smart-roast-target"><option value="">اختر عضو...</option></select>
-            </div>
-            <div class="form-group">
-              <label>🗣️ تخصيص اللهجة لهذه الذبة (اختياري)</label>
-              <select id="smart-roast-dialect">
-                <option value="">نفس لهجة البوت الحالية</option>
-                <option value="default">⚡ عامية سعودية (Default)</option>
-                <option value="riyadh">🇸🇦 لهجة الرياض / نجدية</option>
-                <option value="jeddah">🌴 لهجة جدة / حجازية</option>
-                <option value="qassim">🌾 لهجة القصيم</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>🔥 مستوى القسوة: <span id="lbl-intensity" style="color:var(--accent);font-weight:900">3 - متوازنة 🎯</span></label>
-              <input type="range" id="smart-roast-intensity" min="1" max="5" value="3" oninput="updateIntensityLabel(this.value)">
-            </div>
-            <div class="form-group" style="margin-top:.8rem">
-              <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none;font-size:.82rem">
-                <input type="checkbox" id="smart-roast-audio" checked style="width:auto;accent-color:var(--accent)">
-                <span>تشغيل الذبة صوتياً بالفويس إذا كان متواجداً 🔊</span>
-              </label>
-            </div>
-          </div>
-          <div>
-            <div class="form-group">
-              <label>💡 موضوع الذبة وسياقها (اختياري)</label>
-              <select id="smart-roast-preset" onchange="applyTopicPreset(this.value)" style="margin-bottom:.4rem">
-                <option value="">-- أفكار جاهزة سريعة --</option>
-                <option value="صنم بالفويس من زمان وما يتكلم">صنم بالفويس وما يتكلم</option>
-                <option value="لعب نوب وخسر الرانك والكل يعاني منه">لعب نوب وتخريب الرانك</option>
-                <option value="سهران ومسوي فيها مشغول وما ينام">سهران ومسوي فيها مشغول</option>
-                <option value="دافن المايك وعايش في عالم موازي">مسوي دفن وسابح بعالمه</option>
-                <option value="dossier">استخدم ملف الفضائح والسوابق حقه</option>
-              </select>
-              <textarea id="smart-roast-topic" placeholder="اكتب فكرة الذبة أو اتركه فارغاً والـ AI سيبحث في نشاطه وسوابقه ويجلده..."></textarea>
-            </div>
-            <button class="btn btn-red" style="width:100%;margin-top:.5rem;padding:.7rem;font-size:.88rem;justify-content:center" onclick="launchSmartRoast()" id="btn-smart-roast">🚀 أطلق الذبة الذكية</button>
-            <p id="smart-roast-msg" style="font-size:.75rem;min-height:1rem;margin-top:.4rem"></p>
-          </div>
+      <div class="glass-card metric-card">
+        <div class="metric-icon-box" style="background:var(--emerald-dim); color:var(--emerald);">⏱️</div>
+        <div>
+          <div class="metric-val" id="hudNextRoast">0 د</div>
+          <div class="metric-label">القصف العشوائي القادم</div>
         </div>
       </div>
     </div>
 
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>🕹️ أوامر سريعة</h2></div>
-        <div class="card-body">
-          <div class="controls">
-            <button class="btn btn-red" onclick="forceRoast()">⚡ ذب الحين (عشوائي)</button>
-            <button class="btn btn-yellow" onclick="toggleLoop()" id="btn-toggle">⏯️ إيقاف/تشغيل</button>
-            <button class="btn" onclick="loadData()">🔄 تحديث</button>
-          </div>
-          <div class="form-group" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
-            <label>🤖 شخصية البوت (يتغير أسلوب الذبة)</label>
-            <div style="display:flex;gap:.5rem; margin-bottom: .8rem">
-              <select id="persona-select" style="flex:1">
-                <option value="troll">الطقطوقي المروق (العادي)</option>
-                <option value="boomer">الشايب المعصّب (نصايح وتقريع)</option>
-                <option value="tryhard">المحترف الأجنبي (متعالي واسبورتس)</option>
-                <option value="psycho">المريض النفسي الغامض (مستفز وهادئ)</option>
-              </select>
-              <button class="btn btn-green btn-sm" onclick="changePersona()">🎭 تغيير</button>
+    <!-- Quick Tactical Actions -->
+    <div class="action-strip">
+      <button class="cyber-btn" onclick="forceRandomRoast()">
+        <span>🚀 إطلاق قصف عشوائي فوري</span>
+      </button>
+      <button class="cyber-btn danger" onclick="toggleEngineLoop()">
+        <span id="btnLoopToggleTxt">⏸️ إيقاف المحرك التلقائي</span>
+      </button>
+      <button class="cyber-btn purple" onclick="openQuickCourtModal()">
+        <span>⚖️ فتح جلسة محاكمة فورية</span>
+      </button>
+      <button class="cyber-btn" onclick="generateAiReport()">
+        <span>📑 توليد تقرير استخباراتي ساخر</span>
+      </button>
+    </div>
+
+    <!-- Live Tactical Radar & Feeds -->
+    <div class="layout-2col">
+      <!-- Active Targets Radar -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">🎙️ رادار المتواجدين في الفويس (أهداف محتملة)</div>
+          <span class="version-badge" id="vcCountBadge">0 أهداف</span>
+        </div>
+        <div class="vc-members-grid" id="vcRadarContainer">
+          <p style="color:var(--text-muted);">لا يوجد أحد في الفويس حالياً... الجميع مختبئ!</p>
+        </div>
+      </div>
+
+      <!-- Live Stream of Roasts -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">📜 رادار الذبات المباشر (Live Strike Feed)</div>
+          <button class="chip-btn" onclick="fetchData()">🔄 تحديث</button>
+        </div>
+        <div class="feed-box" id="roastFeedContainer">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Tactical AI Alerts -->
+    <div class="glass-card" style="margin-top: 1.5rem;">
+      <div class="card-header">
+        <div class="card-title">🚨 تنبيهات الرادار الذكي (Tactical Recon Alerts)</div>
+      </div>
+      <div id="reconAlertsContainer" style="display:flex; flex-direction:column; gap:0.5rem;">
+        <p style="color:var(--text-muted);">الرادار يمسح السيرفر... لا توجد خروقات حالياً.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAB 2: SHAME CARDS STUDIO ================= -->
+  <section id="tab-shamecard" class="tab-content">
+    <div class="glass-card" style="margin-bottom: 2rem;">
+      <div class="card-header">
+        <div class="card-title">🎴 استوديو بطاقات العار الهولوغرافية (Shame Card Hologram Studio)</div>
+      </div>
+      <p style="color:var(--text-muted); margin-bottom: 1.5rem;">
+        قم بإصدار بطاقة عار رسمية رقمية لأي عضو في السيرفر مع إحصائياته الفضائحية، لقبه المخزي، وذبته الخاصة بدقة عالية وإرسالها مباشرة لقناة الديسكورد!
+      </p>
+
+      <div class="shame-studio-grid">
+        <!-- 3D Interactive Card Preview -->
+        <div class="holo-card-viewport">
+          <div class="holo-card" id="holoCardPreview" onmousemove="handleCardTilt(event, this)" onmouseleave="resetCardTilt(this)">
+            <div class="holo-avatar-wrap">
+              <img id="cardHoloAvatar" class="holo-avatar" src="https://cdn.discordapp.com/embed/avatars/0.png" alt="Avatar">
             </div>
-            
-            <div style="margin-bottom:1rem; padding:1rem; background:var(--bg2); border-radius:10px; border:1px dashed var(--purple)">
-              <label style="color:var(--purple);font-weight:bold;margin-bottom:.5rem;">🖼️ صانع الشخصيات الذكي (ارفع صورة)</label>
-              <div style="display:flex;gap:.5rem; align-items:center">
-                <input type="file" id="persona-image" accept="image/*" style="flex:1; font-size:.75rem">
-                <button class="btn btn-purple btn-sm" onclick="buildPersona()" id="btn-build-persona" style="background:var(--purple);color:#fff;border-color:var(--purple)">✨ ابتكار شخصية</button>
+            <div class="holo-name" id="cardHoloName">اسم العضو</div>
+            <div class="holo-title" id="cardHoloTitle">أمير التصريفات</div>
+
+            <div class="holo-stats">
+              <div class="holo-stat-box">
+                <div class="holo-stat-val" id="statExcuse">94%</div>
+                <div class="holo-stat-lbl">نسبة التصريف</div>
               </div>
-              <p id="persona-build-msg" style="font-size:.7rem; color:var(--muted); margin-top:.5rem"></p>
+              <div class="holo-stat-box">
+                <div class="holo-stat-val" id="statAim">12%</div>
+                <div class="holo-stat-lbl">دقة الإيم</div>
+              </div>
+              <div class="holo-stat-box">
+                <div class="holo-stat-val" id="statChoke">88%</div>
+                <div class="holo-stat-lbl">معدل النكبة</div>
+              </div>
+              <div class="holo-stat-box">
+                <div class="holo-stat-val" id="statSleep">14h</div>
+                <div class="holo-stat-lbl">نوم وتصريف</div>
+              </div>
             </div>
-            
-            <label>🎙️ صوت البوت (يتغير بالروم)</label>
-            <div style="display:flex;gap:.5rem">
-              <select id="voice-select" style="flex:1">
-                <option value="Kore">Kore - صوت البارزة الهادئة</option>
-                <option value="Aoede">Aoede - صوت خفيف/طبيعي</option>
-                <option value="Puck">Puck - الجان المشاغب (مناسب للذبات)</option>
-                <option value="Fenrir">Fenrir - عميق وضخم</option>
-                <option value="Charon">Charon - هادئ ورزين</option>
+
+            <div class="holo-quote" id="cardHoloQuote">
+              "أشهر تصريفاته: النت طفى فجأة وأمي تناديني!"
+            </div>
+          </div>
+        </div>
+
+        <!-- Studio Controls -->
+        <div>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem; margin-bottom:1.25rem;">
+            <div>
+              <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">اختر العضو المستهدف:</label>
+              <select id="shameMemberSelect" class="input-control" onchange="previewShameCard()">
+                <!-- Populated dynamically -->
               </select>
-              <button class="btn btn-purple btn-sm" onclick="changeVoice()" style="background:var(--purple);color:#fff;border-color:var(--purple)">🎙️ تغيير</button>
             </div>
-            <p id="voice-msg" style="font-size:.75rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
-          </div>
-          <!-- Minigames Section -->
-          <div class="form-group" style="margin-top:1rem; border-top:1px dashed var(--border); padding-top:1rem;">
-            <label>👾 توليد لعبة مصغرة في الشات (AI Minigames)</label>
-            <div style="display:flex;gap:.5rem; align-items:center">
-              <select id="minigame-type" style="flex:1">
-                <option value="trivia">لعبة تحدي معلومات (Trivia)</option>
-                <option value="roast_battle">تحدي الذبات (Roast Battle)</option>
-                <option value="math">لعبة سرعة حساب (مسألة رياضية)</option>
+            <div>
+              <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">اللهجة المعتمدة للبطاقة:</label>
+              <select id="shameDialectSelect" class="input-control" onchange="previewShameCard()">
+                <option value="default">عامية سعودية معاصرة</option>
+                <option value="riyadh">لهجة الرياض / نجدية</option>
+                <option value="jeddah">لهجة جدة / حجازية</option>
+                <option value="qassim">لهجة القصيم</option>
               </select>
-              <button class="btn btn-blue btn-sm" onclick="startMinigame()" id="btn-minigame">🚀 أطلق اللعبة</button>
             </div>
           </div>
-          
-          <p id="status-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem"></p>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>⏱️ وقت الذبات التلقائية</h2></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>أقل مدة: <strong id="lbl-min">120</strong> دقيقة</label>
-            <input type="range" id="slider-min" min="30" max="600" value="120" oninput="document.getElementById('lbl-min').textContent=this.value">
-          </div>
-          <div class="form-group">
-            <label>أقصى مدة: <strong id="lbl-max">240</strong> دقيقة</label>
-            <input type="range" id="slider-max" min="30" max="720" value="240" oninput="document.getElementById('lbl-max').textContent=this.value">
-          </div>
-          <button class="btn btn-blue" onclick="changeInterval()">💾 حفظ</button>
-          <p id="interval-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem;margin-top:.5rem"></p>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>✍️ ذبة يدوية</h2></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>اختر الضحية</label>
-            <select id="roast-target"><option value="">— اختر —</option></select>
-          </div>
-          <div class="form-group">
-            <label>اكتب الذبة</label>
-            <textarea id="roast-text" placeholder="اكتب ذبتك هنا..."></textarea>
-          </div>
-          <button class="btn btn-red" onclick="sendCustom()">🚀 أرسل</button>
-          <p id="custom-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem;margin-top:.3rem"></p>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>📢 رسالة حرة</h2></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>أرسل أي رسالة بالشات نيابة عن البوت</label>
-            <textarea id="free-text" placeholder="اكتب رسالتك..."></textarea>
-          </div>
-          <button class="btn btn-green" onclick="sendFree()">📨 أرسل</button>
-          <p id="free-msg" style="font-size:.8rem;color:var(--muted);min-height:1rem;margin-top:.3rem"></p>
-        </div>
-      </div>
-    </div>
-  </div>
 
-  <!-- ═══ PAGE: ROASTS ═══ -->
-  <div class="page" id="page-roasts">
-    <div class="card">
-      <div class="card-head">
-        <h2>🔥 سجل الذبات</h2>
-        <div style="display:flex;gap:.5rem;align-items:center">
-          <input type="text" id="roast-filter" placeholder="ابحث..." style="width:160px;padding:.35rem .6rem;font-size:.78rem" oninput="filterRoasts()">
-          <span class="badge badge-red" id="roast-total">0</span>
-        </div>
-      </div>
-      <div class="card-body" id="roasts-list" style="max-height:600px">
-        <div class="empty"><div class="empty-icon">💤</div>لا توجد ذبات</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ═══ PAGE: ANALYTICS ═══ -->
-  <div class="page" id="page-analytics">
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>📈 الذبات آخر 7 أيام</h2></div>
-        <div class="card-body"><div class="chart-box"><canvas id="dailyChart"></canvas></div></div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>⏰ أوقات الذروة (بتوقيت السعودية)</h2></div>
-        <div class="card-body">
-          <div class="hourly-bars" id="hourly-bars"></div>
-          <div style="display:flex;justify-content:space-between;margin-top:4px">
-            <span style="font-size:.6rem;color:var(--dim)">12ص</span>
-            <span style="font-size:.6rem;color:var(--dim)">6ص</span>
-            <span style="font-size:.6rem;color:var(--dim)">12م</span>
-            <span style="font-size:.6rem;color:var(--dim)">6م</span>
-            <span style="font-size:.6rem;color:var(--dim)">12ص</span>
+          <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+            <button class="cyber-btn purple" onclick="previewShameCard()">
+              <span>🎲 إعادة توليد بيانات البطاقة</span>
+            </button>
+            <button class="cyber-btn danger" onclick="sendShameCardToDiscord()">
+              <span>🚀 إرسال البطاقة لقناة الديسكورد فوراً</span>
+            </button>
+            <button class="cyber-btn" onclick="downloadShameCardSvg()">
+              <span>📥 تحميل ملف SVG عالي الدقة</span>
+            </button>
           </div>
-        </div>
-      </div>
-      <div class="card full">
-        <div class="card-head"><h2>🎮 أكثر الألعاب شعبية</h2></div>
-        <div class="card-body" id="games-list"><div class="empty">لا توجد بيانات</div></div>
-      </div>
-      
-      <div class="card full">
-        <div class="card-head"><h2>🧠 تقرير السيرفر الذكي (AI Report)</h2></div>
-        <div class="card-body">
-          <button class="btn btn-purple" onclick="generateAIReport()" id="btn-ai-report" style="background:var(--purple);color:#fff;border-color:var(--purple)">✨ توليد تقرير ذكي عن حالة السيرفر</button>
-          <div id="ai-report-output" style="margin-top:1rem; display:none; background:var(--bg2); padding:1rem; border-radius:10px; border-right:3px solid var(--purple)">
-            <h3 id="ai-title" style="color:var(--purple); margin-bottom:.5rem; font-size:1.1rem">عنوان</h3>
-            <p style="font-size:.85rem; margin-bottom:.3rem"><strong>أكثر عضو انجلد:</strong> <span id="ai-toxic"></span></p>
-            <p style="font-size:.85rem; margin-bottom:.3rem"><strong>أصنم عضو:</strong> <span id="ai-quiet"></span></p>
-            <p style="margin-top:.6rem; font-size:.85rem"><strong>الملخص:</strong> <span id="ai-summary"></span></p>
-            <p style="margin-top:.6rem; color:var(--yellow); font-size:.85rem"><strong>نصيحة الإدمن:</strong> <span id="ai-advice"></span></p>
+
+          <div style="margin-top: 2rem; background:rgba(0,0,0,0.3); border:1px solid var(--border-subtle); border-radius:12px; padding:1.25rem;">
+            <div style="font-weight:800; margin-bottom:0.5rem; color:var(--amber);">💡 مميزات بطاقة العار الرسمية:</div>
+            <p style="font-size:0.85rem; color:var(--text-muted); line-height:1.6;">
+              • يتم تحليل سوابق العضو المسجلة في الـ Dossier وتوليد الإحصائيات الفضائحية بناءً على ساعات تواجده، تصريفاته الموثقة، ومعدل سكوته.<br>
+              • البطاقة ترسل كملف رسومي متقدم (SVG) داخل ديسكورد ليتمكن الجميع من حفظها والتندر بها!
+            </p>
           </div>
         </div>
       </div>
     </div>
-  </div>
+  </section>
 
-  <!-- ═══ PAGE: MEMBERS ═══ -->
-  <div class="page" id="page-members">
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>🛡️ قائمة الحماية</h2><span class="badge badge-blue" id="prot-count">0</span></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>أضف عضو للحماية (ما ينذب)</label>
-            <div style="display:flex;gap:.5rem">
-              <select id="prot-select" style="flex:1"><option value="">اختر</option></select>
-              <button class="btn btn-blue btn-sm" onclick="addProtect()">🛡️ حمِ</button>
-            </div>
-          </div>
-          <div id="protected-list" style="margin-top:.8rem"></div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>👥 كل الأعضاء</h2><span class="badge badge-purple" id="total-members">0</span></div>
-        <div class="card-body" id="all-members-list"><div class="empty">جاري التحميل...</div></div>
-      </div>
-      <div class="card full" style="margin-top:1.5rem">
-        <div class="card-head">
-          <h2>📂 ملفات السوابق والفضائح (Criminal Dossiers)</h2>
-          <span class="badge badge-purple">ذاكرة البوت الشخصية</span>
-        </div>
-        <div class="card-body">
-          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem">
-            اختر أي عضو للاطلاع على سجل سوابقه وأعذاره وتصريفاته المسجلة لدى البوت، أو إضافة مواقف محرجة وألقاب جديدة له:
-          </p>
-          <div style="display:flex;gap:.5rem;max-width:420px">
-            <select id="dossier-member-select"><option value="">اختر عضواً لعرض ملفه...</option></select>
-            <button class="btn btn-purple btn-sm" onclick="openSelectedDossier()">📂 فتح الملف</button>
-          </div>
-        </div>
-      </div>
+  <!-- ================= TAB 3: SERVER COURTROOM ================= -->
+  <section id="tab-courtroom" class="tab-content">
+    <div class="court-banner">
+      <h2>⚖️ محكمة السيرفر العليا (Server Supreme Court)</h2>
+      <p>محاكمات علنية مباشرة مع لائحة اتهام مدعومة بالذكاء الاصطناعي وتصويت حي بأزرار الديسكورد لمدة 90 ثانية لإدانة أو تبرئة المتهم!</p>
     </div>
-  </div>
 
-  <!-- ═══ PAGE: VOICE CHAT ═══ -->
-  <div class="page" id="page-voice">
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>🎤 إعدادات المحادثة الصوتية</h2></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>🔒 السماح للبوت بدخول الفويس</label>
-            <div style="display:flex;gap:.5rem;align-items:center">
-              <button class="btn btn-sm" id="voice-toggle-btn" onclick="toggleVoiceJoin()">🔓 مسموح</button>
-              <button class="btn btn-red btn-sm" onclick="kickVoice()">🚪 أطلع البوت الحين</button>
-            </div>
-          </div>
-          <div class="form-group" style="margin-top:1rem">
-            <label>🥷 الدخول الصوتي الاستباقي (Sneak In)</label>
-            <div style="display:flex;gap:.5rem;align-items:center">
-              <button class="btn btn-sm" id="proactive-toggle-btn" onclick="toggleProactiveAudio()">شغال</button>
-              <span style="font-size: .7rem; color: var(--muted)">يدخل فجأة يسمع السوالف ويذب ثم يطلع</span>
-            </div>
-          </div>
-          <div class="form-group" style="margin-top:1rem">
-            <label>⏱️ الخروج التلقائي بعد سكوت: <strong id="lbl-leave">120</strong> ثانية</label>
-            <input type="range" id="slider-leave" min="30" max="600" value="120" oninput="document.getElementById('lbl-leave').textContent=this.value">
-          </div>
-          <div class="form-group">
-            <label>🎛️ وضع الـ AI بالمحادثة الصوتية</label>
-            <select id="voice-mode-select">
-              <option value="helper">🤖 مساعد ذكي ودود</option>
-              <option value="roaster">🔥 مستر ذبات (يذب بشخصيته الحالية)</option>
-              <option value="dj">🎵 DJ – يغني ويقول شعر</option>
+    <div class="layout-2col">
+      <!-- Trial Initiator -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">🔨 فتح جلسة محاكمة طارئة</div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:1rem;">
+          <div>
+            <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">المتهم في قفص الاتهام:</label>
+            <select id="courtDefendantSelect" class="input-control">
+              <!-- Populated dynamically -->
             </select>
           </div>
-          <button class="btn btn-blue" onclick="saveVoiceSettings()">💾 حفظ الإعدادات</button>
-          <p id="voice-settings-msg" style="font-size:.8rem;color:var(--green);min-height:1rem;margin-top:.3rem"></p>
-          <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
-            <p style="font-size:.8rem;color:var(--muted)">💡 الأعضاء يكتبون <strong>بوت تعال</strong> بالشات عشان البوت يدخل الروم ويتكلم معاهم، و <strong>بوت روح</strong> عشان يطلع.</p>
-          </div>
-          
-          <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
-            <h3 style="font-size:.9rem; color:var(--purple); margin-bottom:.5rem">🎹 الساوند-بورد الذكي (AI Soundboard)</h3>
-            <p style="font-size:.7rem; color:var(--muted); margin-bottom:.8rem">شغّل أصوات ذكية داخل الفويس الحالي بضغطة زر:</p>
-            <div style="display:flex;gap:.5rem; flex-wrap:wrap">
-              <button class="btn btn-purple btn-sm" onclick="playEffect('laugh')">😈 ضحكة شريرة</button>
-              <button class="btn btn-purple btn-sm" onclick="playEffect('scream')">😱 صرخة</button>
-              <button class="btn btn-purple btn-sm" onclick="playEffect('sigh')">😮‍💨 تنهيدة</button>
-              <button class="btn btn-purple btn-sm" onclick="playEffect('bruh')">😑 Bruh</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>🔇 تجاهل أعضاء (ما يرد عليهم بالصوت)</h2></div>
-        <div class="card-body">
-          <div class="form-group">
-            <div style="display:flex;gap:.5rem">
-              <select id="voice-ignore-select" style="flex:1"><option value="">اختر</option></select>
-              <button class="btn btn-red btn-sm" onclick="addVoiceIgnore()">🔇 تجاهل</button>
-            </div>
-          </div>
-          <div id="voice-ignored-list"></div>
-        </div>
-      </div>
-      <div class="card full">
-        <div class="card-head"><h2>📊 سجل المحادثات الصوتية</h2><span class="badge badge-purple" id="voice-log-count">0</span></div>
-        <div class="card-body" id="voice-log-list" style="max-height:350px"><div class="empty">لا توجد محادثات بعد</div></div>
-      </div>
-  </div>
 
-  <!-- ═══ PAGE: DEBUG ═══ -->
-  <div class="page" id="page-debug">
-    <div class="grid">
-      <div class="card">
-        <div class="card-head"><h2>🔧 Voice Debug – حالة الجلسة</h2><button class="btn btn-sm btn-blue" onclick="loadDebug()">🔄 تحديث</button></div>
-        <div class="card-body">
-          <div class="grid3" style="gap:.8rem">
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">الحالة</div>
-              <div id="dbg-status" style="font-size:1.1rem;font-weight:bold">—</div>
-            </div>
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">المتحدث النشط</div>
-              <div id="dbg-speaker" style="font-size:1.1rem;font-weight:bold">—</div>
-            </div>
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">البوت يتكلم؟</div>
-              <div id="dbg-playing" style="font-size:1.1rem;font-weight:bold">—</div>
+          <div>
+            <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">التهمة الجنائية الموجهة له:</label>
+            <input type="text" id="courtChargeInput" class="input-control" placeholder="مثال: الصنم الأبدي لمدة 3 ساعات وتخريب آخر قيم بالرانك">
+          </div>
+
+          <div>
+            <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">نماذج اتهامات جاهزة وسريعة:</label>
+            <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+              <button class="chip-btn" onclick="setCharge('الصنم الأبدي: مسوي ميوت ودفن وساهر على قلوبنا')">الصنم الأبدي</button>
+              <button class="chip-btn" onclick="setCharge('تخريب الرانك: دخل ومات أول واحد وطلع يصرف')">تخريب الرانك</button>
+              <button class="chip-btn" onclick="setCharge('ادعاء النوم: كاتب Sleeping وهو يلعب بالسيرفر')">ادعاء النوم الكاذب</button>
+              <button class="chip-btn" onclick="setCharge('التصريف الاحترافي: قال بجيب موية واختفى 4 أيام')">تصريفة الموية</button>
             </div>
           </div>
-          <div class="grid3" style="gap:.8rem;margin-top:.8rem">
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">📥 Audio Received</div>
-              <div id="dbg-recv" style="font-size:1.3rem;font-weight:bold;color:#22c55e">0</div>
-            </div>
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">📤 Sent to Gemini</div>
-              <div id="dbg-sent" style="font-size:1.3rem;font-weight:bold;color:#3b82f6">0</div>
-            </div>
-            <div style="text-align:center;padding:.5rem;background:var(--bg2);border-radius:8px">
-              <div style="font-size:.7rem;color:var(--muted)">🤖 Gemini Responses</div>
-              <div id="dbg-gemini" style="font-size:1.3rem;font-weight:bold;color:#a855f7">0</div>
-            </div>
+
+          <div>
+            <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">لهجة القاضي رئيس المحكمة:</label>
+            <select id="courtDialectSelect" class="input-control">
+              <option value="default">العامية السعودية</option>
+              <option value="riyadh">نجدية / الرياض</option>
+              <option value="jeddah">حجازية / جدة</option>
+              <option value="qassim">قصيمية</option>
+            </select>
           </div>
-          <div class="grid" style="grid-template-columns:1fr 1fr;gap:.8rem;margin-top:.8rem">
-            <div style="padding:.5rem;background:var(--bg2);border-radius:8px">
-              <span style="font-size:.7rem;color:var(--muted)">Input Buffer:</span>
-              <strong id="dbg-buffer">0 bytes</strong>
-            </div>
-            <div style="padding:.5rem;background:var(--bg2);border-radius:8px">
-              <span style="font-size:.7rem;color:var(--muted)">آخر نشاط قبل:</span>
-              <strong id="dbg-lastact">—</strong>
-            </div>
-          </div>
-          <div style="margin-top:.8rem;padding:.5rem;background:var(--bg2);border-radius:8px">
-            <span style="font-size:.7rem;color:var(--muted)">المشاركين:</span>
-            <span id="dbg-participants">—</span>
-          </div>
+
+          <button class="cyber-btn danger" style="margin-top:0.5rem;" onclick="startCourtTrial()">
+            <span>🔨 النطق ببدء المحاكمة وإرسال التصويت للديسكورد</span>
+          </button>
         </div>
       </div>
-      <div class="card full">
-        <div class="card-head"><h2>📋 Event Log</h2><span class="badge badge-purple" id="dbg-log-count">0</span></div>
-        <div class="card-body" id="dbg-log" style="max-height:500px;overflow-y:auto;font-family:monospace;font-size:.75rem;direction:ltr;text-align:left">
-          <div class="empty">لا توجد جلسة أو أحداث بعد</div>
+
+      <!-- Courtroom Live Dossier Feed -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">📜 سجل الجرائم والإدانات الصادرة</div>
+        </div>
+        <div class="feed-box" id="courtCrimesFeed">
+          <p style="color:var(--text-muted);">لا توجد جرائم مسجلة مؤخراً.</p>
         </div>
       </div>
     </div>
-  </div>
+  </section>
 
+  <!-- ================= TAB 4: 1v1 ROAST BATTLE ARENA ================= -->
+  <section id="tab-battle" class="tab-content">
+    <div class="glass-card">
+      <div class="card-header">
+        <div class="card-title">⚔️ حلبة مواجهات الذبات 1v1 (The Roast Battle Arena)</div>
+      </div>
+      <p style="color:var(--text-muted); margin-bottom: 2rem;">
+        ضع أي شخصين أو اكتب ذباتهما، وسيقوم حكم الذكاء الاصطناعي (Gemini Flash مع التفكير العالي) بفحص الجبهات، تقييم القوة والسرعة، وإعلان الفائز بالضربة القاضية!
+      </p>
+
+      <div class="battle-ring">
+        <!-- Fighter 1 -->
+        <div class="glass-card" style="border-color: rgba(0, 240, 255, 0.3);">
+          <div style="font-weight:900; color:var(--cyan); margin-bottom:0.75rem;">🥊 المتحدي الأول</div>
+          <input type="text" id="battleP1Name" class="input-control" placeholder="اسم المتحدي الأول" value="سعود" style="margin-bottom:0.75rem;">
+          <textarea id="battleP1Roast" class="input-control" placeholder="اكتب ذبة المتحدي الأول هنا..."></textarea>
+        </div>
+
+        <div class="versus-badge">VS</div>
+
+        <!-- Fighter 2 -->
+        <div class="glass-card" style="border-color: rgba(255, 0, 85, 0.3);">
+          <div style="font-weight:900; color:var(--magenta); margin-bottom:0.75rem;">🥊 المتحدي الثاني</div>
+          <input type="text" id="battleP2Name" class="input-control" placeholder="اسم المتحدي الثاني" value="خالد" style="margin-bottom:0.75rem;">
+          <textarea id="battleP2Roast" class="input-control" placeholder="اكتب ذبة المتحدي الثاني هنا..."></textarea>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 1.5rem;">
+        <label style="display:block; font-size:0.85rem; font-weight:700; margin-bottom:0.4rem;">موضوع النزاع (اختياري):</label>
+        <input type="text" id="battleTopicInput" class="input-control" placeholder="مثال: من نكب الثاني في الرانك؟ أو من أكثر واحد يصرف؟">
+      </div>
+
+      <div style="display:flex; justify-content:center;">
+        <button class="cyber-btn" style="padding:0.9rem 2.5rem; font-size:1.1rem;" onclick="judgeBattle()">
+          <span>🔥 تحكيم الذكاء الاصطناعي وإعلان الفائز</span>
+        </button>
+      </div>
+
+      <!-- Verdict Box -->
+      <div id="battleVerdictContainer" style="display:none; margin-top:2rem; background:rgba(0,0,0,0.5); border:1px solid var(--amber); border-radius:14px; padding:1.5rem;">
+        <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1rem;">
+          <div style="font-size:2rem;">🏆</div>
+          <div>
+            <div style="font-size:1.3rem; font-weight:900; color:var(--amber);" id="battleWinnerTitle">الفائز: -</div>
+            <div style="font-size:0.85rem; color:var(--text-muted);" id="battleScoresTxt">النقاط: -</div>
+          </div>
+        </div>
+        <p id="battleCommentaryTxt" style="line-height:1.6; font-size:0.95rem; color:#fff;"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAB 5: DIALECTS & 4-WAY SIMULATOR ================= -->
+  <section id="tab-dialects" class="tab-content">
+    <div class="glass-card" style="margin-bottom: 2rem;">
+      <div class="card-header">
+        <div class="card-title">🗣️ نكسس اللهجات السعودية الرسمية (The Dialect Nexus)</div>
+      </div>
+      <p style="color:var(--text-muted); margin-bottom: 1.5rem;">
+        تحكم في الهوية اللغوية لمستر ذبات! اختر لهجة السيرفر الرسمية واطلع على مقاييس كل لهجة:
+      </p>
+
+      <div class="dialect-grid" id="dialectCardsContainer">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 4-Way Comparative Simulator -->
+    <div class="glass-card">
+      <div class="card-header">
+        <div class="card-title">⚡ المحاكي المقارن اللحظي (4-Dialect Comparative Simulator)</div>
+      </div>
+      <p style="color:var(--text-muted); margin-bottom: 1rem;">
+        أدخل أي موقف أو زلة أو تهمة، وشاهد كيف يقصف مستر ذبات الجبهة بـ 4 لهجات مختلفة في نفس الثانية جنباً إلى جنب!
+      </p>
+
+      <div style="display:flex; gap:1rem; margin-bottom:1.25rem;">
+        <input type="text" id="simTopicInput" class="input-control" placeholder="اكتب الموقف هنا (مثلاً: واحد خسرنا بالرانك وقال الماوس طفى شحنه)">
+        <button class="cyber-btn" onclick="runComparativeSim()" style="white-space:nowrap;">
+          <span>🚀 محاكاة الـ 4 لهجات</span>
+        </button>
+      </div>
+
+      <div class="comparative-grid" id="comparativeResults">
+        <div class="sim-card">
+          <div class="sim-card-header">
+            <span>⚡ عامية معاصرة</span>
+          </div>
+          <p style="color:var(--text-muted); font-size:0.85rem;">في انتظار إطلاق المحاكاة...</p>
+        </div>
+        <div class="sim-card">
+          <div class="sim-card-header">
+            <span>🇸🇦 الرياض / نجدية</span>
+          </div>
+          <p style="color:var(--text-muted); font-size:0.85rem;">في انتظار إطلاق المحاكاة...</p>
+        </div>
+        <div class="sim-card">
+          <div class="sim-card-header">
+            <span>🌴 جدة / حجازية</span>
+          </div>
+          <p style="color:var(--text-muted); font-size:0.85rem;">في انتظار إطلاق المحاكاة...</p>
+        </div>
+        <div class="sim-card">
+          <div class="sim-card-header">
+            <span>🌾 القصيم</span>
+          </div>
+          <p style="color:var(--text-muted); font-size:0.85rem;">في انتظار إطلاق المحاكاة...</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAB 6: CRIMINAL DOSSIER VAULT ================= -->
+  <section id="tab-dossiers" class="tab-content">
+    <div class="glass-card">
+      <div class="card-header">
+        <div class="card-title">🗄️ أرشيف السوابق والفضائح (Criminal Dossier Vault)</div>
+        <div style="width:260px;">
+          <select id="dossierMemberSelect" class="input-control" onchange="loadUserDossier()">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+      </div>
+
+      <div id="dossierDisplayArea">
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:1.25rem; margin-bottom:2rem;">
+          <!-- Titles -->
+          <div class="glass-card" style="background:rgba(0,0,0,0.3);">
+            <div style="font-weight:800; color:var(--cyan); margin-bottom:0.75rem;">🏷️ الألقاب والصفات الرسمية</div>
+            <ul id="dossierTitlesList" style="list-style:none; display:flex; flex-direction:column; gap:0.4rem; font-size:0.85rem;">
+              <li>لا توجد ألقاب</li>
+            </ul>
+          </div>
+
+          <!-- Excuses -->
+          <div class="glass-card" style="background:rgba(0,0,0,0.3);">
+            <div style="font-weight:800; color:var(--amber); margin-bottom:0.75rem;">📜 التصريفات الموثقة</div>
+            <ul id="dossierExcusesList" style="list-style:none; display:flex; flex-direction:column; gap:0.4rem; font-size:0.85rem;">
+              <li>لا توجد تصريفات</li>
+            </ul>
+          </div>
+
+          <!-- Moments -->
+          <div class="glass-card" style="background:rgba(0,0,0,0.3);">
+            <div style="font-weight:800; color:var(--purple); margin-bottom:0.75rem;">🤦 الفضائح والمواقف المحرجة</div>
+            <ul id="dossierMomentsList" style="list-style:none; display:flex; flex-direction:column; gap:0.4rem; font-size:0.85rem;">
+              <li>لا توجد مواقف مسجلة</li>
+            </ul>
+          </div>
+
+          <!-- Crimes -->
+          <div class="glass-card" style="background:rgba(0,0,0,0.3);">
+            <div style="font-weight:800; color:var(--magenta); margin-bottom:0.75rem;">⚖️ إدانات المحكمة الجنائية</div>
+            <ul id="dossierCrimesList" style="list-style:none; display:flex; flex-direction:column; gap:0.4rem; font-size:0.85rem;">
+              <li>سجل نظيف حتى الآن</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Add Entry Form -->
+        <div class="glass-card" style="border-color: rgba(255, 255, 255, 0.1);">
+          <div class="card-title" style="margin-bottom:1rem; font-size:0.95rem;">➕ إضافة سابقة أو تهمة جديدة لهذا العضو:</div>
+          <div style="display:grid; grid-template-columns: 180px 1fr auto; gap:0.75rem;">
+            <select id="dossierAddType" class="input-control">
+              <option value="excuse">تصريفة موثقة</option>
+              <option value="title">لقب رسمي</option>
+              <option value="moment">موقف محرج</option>
+              <option value="crime">إدانة جريمة</option>
+            </select>
+            <input type="text" id="dossierAddContent" class="input-control" placeholder="اكتب النص هنا...">
+            <button class="cyber-btn" onclick="addDossierEntry()"><span>إضافة للملف</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TAB 7: ANALYTICS & DEEP INTEL ================= -->
+  <section id="tab-analytics" class="tab-content">
+    <div class="layout-2col" style="margin-bottom: 2rem;">
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">📈 معدل القصف والذبات (آخر 7 أيام)</div>
+        </div>
+        <canvas id="dailyRoastChart" height="180"></canvas>
+      </div>
+
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">🕒 رادار أوقات الذروة والتواجد في الفويس (24 ساعة)</div>
+        </div>
+        <canvas id="hourlyActivityChart" height="180"></canvas>
+      </div>
+    </div>
+
+    <div class="layout-2col">
+      <!-- Hall of Shame -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">🏆 لوحة العار (أكثر الأعضاء تعرضاً للجلد)</div>
+        </div>
+        <div class="feed-box" id="shameLeaderboard">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Protected VIPs -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">🛡️ قائمة الحصانة الدبلوماسية (الأعضاء المحميون)</div>
+        </div>
+        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+          الأعضاء المدرجون هنا يتمتعون بحصانة مطلقة ضد القصف التلقائي والمحاكمات العشوائية.
+        </p>
+        <div style="display:flex; gap:0.75rem; margin-bottom:1rem;">
+          <select id="protectMemberSelect" class="input-control">
+            <!-- Populated dynamically -->
+          </select>
+          <button class="cyber-btn" onclick="addProtectedMember()"><span>إضافة حصانة</span></button>
+        </div>
+        <div id="protectedListContainer" style="display:flex; flex-direction:column; gap:0.5rem;">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- Slide-Out Cyber CLI Terminal -->
+<div id="cyberCliModal">
+  <div class="cli-header">
+    <span>MR. ROAST OS 3.0 // CYBER CLI TERMINAL</span>
+    <span style="cursor:pointer;" onclick="toggleCliModal()">✕</span>
+  </div>
+  <div class="cli-body" id="cliOutput">Type 'help' to view available system commands.</div>
+  <div class="cli-input-line">
+    <span class="cli-prompt">></span>
+    <input type="text" id="cliInput" class="cli-input" placeholder="enter command..." onkeydown="handleCliKey(event)">
+  </div>
 </div>
 
-<!-- Dossier Modal -->
-<div class="modal-backdrop" id="dossier-modal" onclick="if(event.target===this)closeDossierModal()">
-  <div class="modal">
-    <div class="modal-head">
-      <div style="display:flex;align-items:center;gap:.6rem">
-        <img id="dm-avatar" src="" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--accent)">
-        <div>
-          <h3 id="dm-name" style="font-size:.95rem;font-weight:700">ملف العضو</h3>
-          <span style="font-size:.7rem;color:var(--muted)" id="dm-id">ID</span>
-        </div>
-      </div>
-      <button class="btn btn-sm" onclick="closeDossierModal()" style="border:none;background:transparent;font-size:1.1rem;cursor:pointer">✖</button>
-    </div>
-    <div class="modal-body">
-      <div style="margin-bottom:1.2rem">
-        <h4 style="font-size:.82rem;color:var(--yellow);margin-bottom:.4rem">👑 الألقاب الساخرة المعروفة</h4>
-        <div id="dm-titles" style="display:flex;gap:.4rem;flex-wrap:wrap"><span class="badge">لا يوجد</span></div>
-      </div>
-      <div style="margin-bottom:1.2rem">
-        <h4 style="font-size:.82rem;color:var(--blue);margin-bottom:.4rem">🤥 أشهر الأعذار والتصريفات</h4>
-        <div id="dm-excuses" style="display:flex;flex-direction:column;gap:.3rem"><span style="font-size:.75rem;color:var(--muted)">لا يوجد</span></div>
-      </div>
-      <div style="margin-bottom:1.2rem">
-        <h4 style="font-size:.82rem;color:var(--accent);margin-bottom:.4rem">🙈 مواقف محرجة وفضائح مسجلة</h4>
-        <div id="dm-moments" style="display:flex;flex-direction:column;gap:.3rem"><span style="font-size:.75rem;color:var(--muted)">لا يوجد</span></div>
-      </div>
-      <hr style="border:none;border-top:1px solid var(--border);margin:1rem 0">
-      <h4 style="font-size:.82rem;color:var(--green);margin-bottom:.5rem">➕ إضافة معلومة جديدة لملف العار</h4>
-      <div class="form-group">
-        <select id="dm-add-type" style="margin-bottom:.4rem">
-          <option value="excuse">🤥 تصريفة / عذر مشهور</option>
-          <option value="moment">🙈 موقف محرج / فضيحة</option>
-          <option value="title">👑 لقب ساخر جديد</option>
-        </select>
-        <input type="text" id="dm-add-text" placeholder="اكتب المعلومة هنا ليستخدمها البوت في الذب...">
-      </div>
-      <button class="btn btn-green btn-sm" style="width:100%;justify-content:center" onclick="addDossierItem()">💾 حفظ في الملف</button>
-    </div>
-  </div>
-</div>
+<!-- Toast Container -->
+<div id="toastHost"></div>
 
 <script>
-let D={}, dailyChartInstance=null, allRoasts=[];
+// ─── Web Audio Synthesizer (Zero Audio Files Needed) ─────────────────────────
+let audioCtx = null;
+let sfxEnabled = true;
 
-function showPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
-  event.target.classList.add('active');
-  if(id==='analytics') renderCharts();
-  if(id==='debug'){loadDebug();debugInterval=setInterval(loadDebug,3000)}
-  else{if(debugInterval){clearInterval(debugInterval);debugInterval=null}}
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
 }
 
-function toggleTheme(){
-  document.body.classList.toggle('light');
-  document.getElementById('theme-btn').textContent=document.body.classList.contains('light')?'🌙':'☀️';
+function playSound(type) {
+  if (!sfxEnabled) return;
+  try {
+    initAudio();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t = audioCtx.currentTime;
+
+    if (type === 'beep') {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(800, t);
+      osc.frequency.exponentialRampToValueAtTime(400, t + 0.08);
+      gain.gain.setValueAtTime(0.12, t);
+      gain.gain.linearRampToValueAtTime(0.01, t + 0.08);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(t); osc.stop(t + 0.08);
+    }
+    else if (type === 'laser') {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1200, t);
+      osc.frequency.exponentialRampToValueAtTime(80, t + 0.25);
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.linearRampToValueAtTime(0.01, t + 0.25);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(t); osc.stop(t + 0.25);
+    }
+    else if (type === 'gavel') {
+      // Deep resonant court gavel thud
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(160, t);
+      osc.frequency.exponentialRampToValueAtTime(30, t + 0.4);
+      gain.gain.setValueAtTime(0.5, t);
+      gain.gain.linearRampToValueAtTime(0.01, t + 0.4);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(t); osc.stop(t + 0.4);
+    }
+    else if (type === 'fanfare') {
+      [300, 450, 600, 900].forEach((freq, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.setValueAtTime(freq, t + i * 0.07);
+        gain.gain.setValueAtTime(0.15, t + i * 0.07);
+        gain.gain.linearRampToValueAtTime(0.01, t + i * 0.07 + 0.2);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(t + i * 0.07); osc.stop(t + i * 0.07 + 0.2);
+      });
+    }
+  } catch(e) {}
 }
 
-function toast(msg,type='info'){
-  const c=document.getElementById('toasts');
-  const t=document.createElement('div');
-  t.className='toast';
-  t.innerHTML=(type==='ok'?'✅':'🔔')+' '+msg;
-  c.appendChild(t);
-  setTimeout(()=>t.remove(),3500);
+function toggleAudioSFX() {
+  sfxEnabled = !sfxEnabled;
+  document.getElementById('sfxIcon').innerText = sfxEnabled ? '🔊' : '🔇';
+  document.getElementById('sfxToggleBtn').children[1].innerText = sfxEnabled ? 'مؤثرات الصوت: مفعّلة' : 'مؤثرات الصوت: معطّلة';
+  showToast(sfxEnabled ? 'تم تفعيل المؤثرات الصوتية' : 'تم تعطيل المؤثرات الصوتية', 'info');
 }
 
-function fmtDur(m){
-  if(m>=60){const h=Math.floor(m/60),mn=m%60;const hl=h===1?'ساعة':h===2?'ساعتين':h+' ساعات';return mn?hl+' و '+mn+' د':hl}
-  return m+' دقيقة';
+// ─── Cyber Background Animation ──────────────────────────────────────────────
+const canvas = document.getElementById('cyberCanvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
 }
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
-async function loadData(){
-  try{
-    const r=await fetch('/api/stats');D=await r.json();
-    document.getElementById('bot-name').textContent=D.bot_name+' 🔥';
-    document.getElementById('bot-avatar').src=D.bot_avatar;
-    const ls=document.getElementById('loop-status');
-    ls.innerHTML=D.roast_loop_running?'<span class="badge badge-green pulse">● شغّال</span> <span style="color:var(--muted);font-size:.72rem">الذبة الجاية بعد '+D.next_roast_in+' د</span>':'<span class="badge badge-red">● متوقف</span>';
+class Particle {
+  constructor() {
+    this.x = Math.random() * canvas.width;
+    this.y = Math.random() * canvas.height;
+    this.vx = (Math.random() - 0.5) * 0.4;
+    this.vy = (Math.random() - 0.5) * 0.4;
+    this.radius = Math.random() * 1.8 + 0.6;
+    this.color = Math.random() > 0.6 ? '#00f0ff' : (Math.random() > 0.5 ? '#ff0055' : '#a855f7');
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    if (this.x < 0 || this.x > canvas.width) this.vx *= -1;
+    if (this.y < 0 || this.y > canvas.height) this.vy *= -1;
+  }
+  draw() {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+  }
+}
+for (let i = 0; i < 45; i++) particles.push(new Particle());
 
-    document.getElementById('s-roasts').textContent=D.total_roasts;
-    document.getElementById('s-vc').textContent=D.members_in_vc.length;
-    document.getElementById('s-mins').textContent=D.total_vc_minutes;
-    document.getElementById('s-online').textContent=D.guild?.online||'—';
-    document.getElementById('s-uptime').textContent=D.uptime_minutes;
-    document.getElementById('s-next').textContent=D.roast_loop_running?D.next_roast_in+' د':'—';
-    document.getElementById('vc-count').textContent=D.members_in_vc.length;
-    document.getElementById('roast-total').textContent=D.recent_roasts.length;
-
-    // AI Alerts
-    const alertsBox = document.getElementById('ai-alerts-box');
-    if(alertsBox) {
-      if(D.alerts && D.alerts.length > 0) {
-        alertsBox.innerHTML = D.alerts.map(a => `<div style="padding:.5rem; background:rgba(244,63,94,.1); border-left:3px solid var(--accent); margin-bottom:.5rem; font-size:.8rem; border-radius:4px">${a}</div>`).join('');
-      } else {
-        alertsBox.innerHTML = '<div class="empty" style="padding:.5rem; font-size:.75rem">لا توجد تنبيهات حالياً</div>';
+function animateCanvas() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < particles.length; i++) {
+    particles[i].update();
+    particles[i].draw();
+    for (let j = i + 1; j < particles.length; j++) {
+      const dx = particles[i].x - particles[j].x;
+      const dy = particles[i].y - particles[j].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 110) {
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(0, 240, 255, ${0.12 * (1 - dist / 110)})`;
+        ctx.lineWidth = 0.6;
+        ctx.moveTo(particles[i].x, particles[i].y);
+        ctx.lineTo(particles[j].x, particles[j].y);
+        ctx.stroke();
       }
     }
+  }
+  requestAnimationFrame(animateCanvas);
+}
+animateCanvas();
 
-    // Interval sliders
-    document.getElementById('slider-min').value=D.interval_min;document.getElementById('lbl-min').textContent=D.interval_min;
-    document.getElementById('slider-max').value=D.interval_max;document.getElementById('lbl-max').textContent=D.interval_max;
-    // Settings
-    if(D.current_voice) document.getElementById('voice-select').value = D.current_voice;
-    if(D.current_persona) document.getElementById('persona-select').value = D.current_persona;
-
-    // Voice chat settings
-    if(D.voice_join_allowed !== undefined){
-      document.getElementById('voice-toggle-btn').innerHTML = D.voice_join_allowed ? '🔓 مسموح' : '🔒 ممنوع';
-      document.getElementById('voice-toggle-btn').className = D.voice_join_allowed ? 'btn btn-green btn-sm' : 'btn btn-red btn-sm';
-    }
-    if(D.voice_proactive_audio !== undefined){
-      document.getElementById('proactive-toggle-btn').innerHTML = D.voice_proactive_audio ? '🥷 شغال (مفعل)' : '🛑 معطل';
-      document.getElementById('proactive-toggle-btn').className = D.voice_proactive_audio ? 'btn btn-green btn-sm' : 'btn btn-red btn-sm';
-    }
-    if(D.voice_auto_leave_sec) { document.getElementById('slider-leave').value = D.voice_auto_leave_sec; document.getElementById('lbl-leave').textContent = D.voice_auto_leave_sec; }
-    if(D.voice_ai_mode) document.getElementById('voice-mode-select').value = D.voice_ai_mode;
-
-    // Voice ignore dropdown
-    const viOpts='<option value="">اختر</option>'+D.all_members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
-    document.getElementById('voice-ignore-select').innerHTML = viOpts;
-
-    // Voice ignored list
-    const vil = document.getElementById('voice-ignored-list');
-    if(!D.voice_ignored?.length){vil.innerHTML='<div class="empty" style="padding:.5rem">لا أحد متجاهل</div>'}
-    else{vil.innerHTML=D.voice_ignored.map(p=>`<div style="display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:.82rem;font-weight:700">${p.name}</span><button class="btn btn-sm" onclick="removeVoiceIgnore(${p.id})" style="color:var(--accent)">❌</button></div>`).join('')}
-
-    // Voice session log
-    document.getElementById('voice-log-count').textContent = D.voice_session_log?.length || 0;
-    const vll = document.getElementById('voice-log-list');
-    if(!D.voice_session_log?.length){vll.innerHTML='<div class="empty">لا توجد محادثات بعد</div>'}
-    else{vll.innerHTML=[...D.voice_session_log].reverse().map(s=>{
-      const st = new Date(s.start*1000).toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'});
-      const dur = s.end ? Math.round((s.end-s.start)/60) : '...';
-      const badge = s.status==='active'?'<span class="badge badge-green pulse">● نشط</span>':'<span class="badge badge-red">● منتهي</span>';
-      return `<div style="padding:.5rem 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:.5rem">${badge}<strong style="font-size:.82rem">${s.requester}</strong><span style="color:var(--muted);font-size:.72rem">${st} | ${s.channel} | ${dur} د | ${s.messages||0} رد</span></div>${s.reason?`<span style="font-size:.7rem;color:var(--dim)">📌 ${s.reason}</span>`:''}</div>`;
-    }).join('')}
-
-    // Members in VC
-    const ml=document.getElementById('members-list');
-    if(!D.members_in_vc.length){ml.innerHTML='<div class="empty"><div class="empty-icon">🔇</div>لا أحد بالفويس</div>'}
-    else{ml.innerHTML=D.members_in_vc.map(m=>{
-      const tags=[];
-      if(m.deafened)tags.push('<span class="badge badge-red">🔇 دفن</span>');
-      else if(m.muted)tags.push('<span class="badge badge-yellow">🔕 ميوت</span>');
-      if(m.streaming)tags.push('<span class="badge badge-purple">📺 بث</span>');
-      if(m.games?.length)tags.push('<span class="badge badge-blue">🎮 '+m.games[m.games.length-1]+'</span>');
-      if(m.custom_status)tags.push('<span class="badge badge-cyan">💬 '+m.custom_status+'</span>');
-      if(m.protected)tags.push('<span class="badge badge-green">🛡️</span>');
-      
-      let spkTag = '';
-      if(m.speak_ratio > 70) spkTag = `<span title="مزعج الروم" style="font-size:.7rem; color:var(--accent);">🔊 يسولف واجد (${m.speak_ratio}%)</span>`;
-      else if(m.speak_ratio < 10 && m.minutes > 5 && !m.muted && !m.deafened) spkTag = `<span title="صنم" style="font-size:.7rem; color:var(--muted);">💤 صامت (${m.speak_ratio}%)</span>`;
-
-      return `<div class="member"><div class="member-avatar"><img src="${m.avatar}"><div class="status-dot status-${m.status||'offline'}"></div></div><div class="member-info"><div class="member-name">${m.name} ${tags.join(' ')}</div><div class="member-meta"><span>📍 ${m.channel}</span><span>⏱️ ${fmtDur(m.minutes)}</span> ${spkTag}</div></div><div style="display:flex;gap:.3rem;align-items:center;margin-right:auto"><button class="btn btn-sm" onclick="quickSmartRoast('${m.id}')" title="ذب عليه الآن" style="padding:.25rem .55rem;font-size:.72rem">🎯 ذب</button><button class="btn btn-sm" onclick="openDossierModal('${m.id}', '${m.name.replace(/'/g, "\\'")}', '${m.avatar}')" title="فتح ملف السوابق" style="padding:.25rem .55rem;font-size:.72rem">📂 ملفه</button></div></div>`;
-    }).join('')}
-
-    // Shame board
-    const sl=document.getElementById('shame-list');
-    if(!D.shame_board?.length){sl.innerHTML='<div class="empty"><div class="empty-icon">😇</div>ما فيه ضحايا</div>'}
-    else{sl.innerHTML=D.shame_board.map((s,i)=>{
-      const rc=i===0?'gold':i===1?'silver':i===2?'bronze':'';
-      const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1);
-      const grad = s.grudge > 40 ? '🔥 حقد شديد' : s.grudge > 10 ? '😡 عداوة' : '';
-      return `<div class="shame-item">
-        <div class="shame-rank ${rc}">${medal}</div>
-        <img src="${s.avatar}" style="width:32px;height:32px;border-radius:50%">
-        <div style="display:flex;flex-direction:column;">
-          <span style="font-weight:700;font-size:.85rem">${s.name}</span>
-          <span style="font-size:.65rem;color:var(--accent)">${grad ? grad + ' ('+s.grudge+')' : 'مستوى الحقد: '+s.grudge}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:.4rem;margin-right:auto">
-          <button class="btn btn-sm" onclick="openDossierModal('${s.id}', '${s.name.replace(/'/g, "\\'")}', '${s.avatar}')" title="ملف السوابق" style="padding:.2rem .45rem;font-size:.7rem">📂</button>
-          <span class="shame-count">${s.count} ذبة</span>
-        </div>
-      </div>`;
-    }).join('')}
-
-    // Roasts
-    allRoasts=D.recent_roasts;filterRoasts();
-
-    // Dropdowns
-    const opts='<option value="">— اختر —</option>'+D.all_members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
-    ['roast-target','target-member','smart-roast-target','prot-select','dossier-member-select'].forEach(id=>{
-      const el=document.getElementById(id);
-      if(el) el.innerHTML=opts;
-    });
-
-    // Dialects
-    if(D.current_dialect && D.dialects){
-      renderDialects(D.current_dialect, D.dialects);
-    }
-
-    // Games
-    const gl=document.getElementById('games-list');
-    if(!D.top_games?.length){gl.innerHTML='<div class="empty">لا توجد بيانات</div>'}
-    else{const mx=D.top_games[0].count;
-      const colors=['var(--accent)','var(--purple)','var(--blue)','var(--green)','var(--yellow)','var(--cyan)','var(--accent2)','#f472b6','#34d399','#60a5fa'];
-      gl.innerHTML=D.top_games.map((g,i)=>`<div class="game-bar"><span class="name">${g.name}</span><div class="bar"><div class="fill" style="width:${(g.count/mx*100)}%;background:${colors[i%colors.length]}"></div></div><span class="count">${g.count}</span></div>`).join('')}
-
-    // Hourly
-    const hb=document.getElementById('hourly-bars');
-    if(D.hourly_activity){const mx=Math.max(...D.hourly_activity,1);
-      const colors=D.hourly_activity.map((_,i)=>i>=22||i<6?'var(--purple)':i<12?'var(--blue)':'var(--green)');
-      hb.innerHTML=D.hourly_activity.map((v,i)=>`<div><div class="hourly-bar" style="height:${Math.max(v/mx*110,4)}px;background:${colors[i]}" title="${i}:00 = ${v} دخلة"></div><div class="hourly-label">${i}</div></div>`).join('')}
-
-    // Protected
-    const pl=document.getElementById('protected-list');
-    document.getElementById('prot-count').textContent=D.protected?.length||0;
-    if(!D.protected?.length){pl.innerHTML='<div class="empty" style="padding:.5rem">لا أحد محمي</div>'}
-    else{pl.innerHTML=D.protected.map(p=>`<div style="display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--border)"><img src="${p.avatar}" style="width:28px;height:28px;border-radius:50%"><span style="flex:1;font-size:.82rem;font-weight:700">${p.name}</span><button class="btn btn-sm" onclick="removeProtect(${p.id})" style="color:var(--accent)">❌</button></div>`).join('')}
-
-    // Total members
-    document.getElementById('total-members').textContent=D.all_members?.length||0;
-    const aml=document.getElementById('all-members-list');
-    aml.innerHTML=(D.all_members||[]).map(m=>`<div style="display:flex;align-items:center;gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--border)"><img src="${m.avatar}" style="width:26px;height:26px;border-radius:50%"><span style="font-size:.8rem">${m.name}</span></div>`).join('');
-
-  }catch(e){console.error(e)}
+// ─── Navigation & Tabs ───────────────────────────────────────────────────────
+function switchTab(tabId, el) {
+  playSound('beep');
+  document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + tabId).classList.add('active');
+  if (el) el.classList.add('active');
 }
 
-function filterRoasts(){
-  const q=(document.getElementById('roast-filter')?.value||'').toLowerCase();
-  const list=q?allRoasts.filter(r=>r.member.toLowerCase().includes(q)||r.roast.toLowerCase().includes(q)):allRoasts;
-  const rl=document.getElementById('roasts-list');
-  if(!list.length){rl.innerHTML='<div class="empty"><div class="empty-icon">💤</div>لا توجد نتائج</div>';return}
-  rl.innerHTML=[...list].reverse().map(r=>{
-    const d=new Date(r.time*1000);const t=d.toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'});
-    const day=d.toLocaleDateString('ar-SA',{month:'short',day:'numeric'});
-    return `<div class="roast-item"><div class="roast-head"><span class="roast-name">@${r.member}</span><span class="roast-time">${day} ${t}</span></div><div class="roast-text">${r.roast}</div></div>`;
+// ─── 3D Card Hover Tilt ──────────────────────────────────────────────────────
+function handleCardTilt(e, card) {
+  const rect = card.getBoundingClientRect();
+  const x = e.clientX - rect.left - rect.width / 2;
+  const y = e.clientY - rect.top - rect.height / 2;
+  const rotX = (y / (rect.height / 2)) * -12;
+  const rotY = (x / (rect.width / 2)) * 12;
+  card.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg) scale(1.02)`;
+}
+function resetCardTilt(card) {
+  card.style.transform = 'rotateX(0deg) rotateY(0deg) scale(1)';
+}
+
+// ─── Toast Notifications ─────────────────────────────────────────────────────
+function showToast(msg, type = 'success') {
+  const host = document.getElementById('toastHost');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span>${type === 'success' ? '✅' : (type === 'danger' ? '❌' : 'ℹ️')}</span><span>${msg}</span>`;
+  host.appendChild(toast);
+  setTimeout(() => { toast.remove(); }, 3500);
+}
+
+// ─── State & Charts ─────────────────────────────────────────────────────────
+let state = null;
+let dailyChartInstance = null;
+let hourlyChartInstance = null;
+
+async function fetchData() {
+  try {
+    const res = await fetch('/api/stats');
+    state = await res.json();
+    renderDashboard(state);
+  } catch (e) {
+    console.error('Fetch stats error:', e);
+  }
+}
+
+function renderDashboard(data) {
+  // Brand & Guild
+  if (data.bot_name) document.getElementById('botName').innerText = data.bot_name;
+  if (data.bot_avatar) document.getElementById('botAvatar').src = data.bot_avatar;
+  if (data.guild && data.guild.name) {
+    document.getElementById('serverInfo').innerText = `${data.guild.name} • ${data.guild.online || 0} متصل الآن`;
+  }
+
+  // HUD
+  document.getElementById('hudTotalRoasts').innerText = data.total_roasts || 0;
+  document.getElementById('hudActiveVc').innerText = data.members_in_vc ? data.members_in_vc.length : 0;
+  document.getElementById('hudCurrentDialect').innerText = (data.current_dialect || 'default').toUpperCase();
+  document.getElementById('hudNextRoast').innerText = `${data.next_roast_in || 0} د`;
+  document.getElementById('vcCountBadge').innerText = `${data.members_in_vc ? data.members_in_vc.length : 0} أهداف`;
+
+  // Loop button
+  const loopRunning = data.roast_loop_running;
+  document.getElementById('loopStatusText').innerText = loopRunning ? 'المحرك: نشط' : 'المحرك: متوقف';
+  document.getElementById('btnLoopToggleTxt').innerText = loopRunning ? '⏸️ إيقاف المحرك التلقائي' : '▶️ تشغيل المحرك التلقائي';
+
+  // Populate Dropdowns
+  populateMembersSelects(data);
+
+  // Render VC Members
+  renderVcRadar(data.members_in_vc || []);
+
+  // Render Roast Feed
+  renderRoastFeed(data.recent_roasts || []);
+
+  // Render AI Alerts
+  renderReconAlerts(data.alerts || []);
+
+  // Render Dialect Cards
+  renderDialectCards(data.dialects || [], data.current_dialect);
+
+  // Render Hall of Shame
+  renderHallOfShame(data.shame_board || []);
+
+  // Render Protected List
+  renderProtectedList(data.protected || []);
+
+  // Render Charts
+  renderCharts(data);
+}
+
+function populateMembersSelects(data) {
+  const all = data.all_members || [];
+  const inVc = data.members_in_vc || [];
+  const combined = inVc.concat(all.filter(a => !inVc.some(v => v.id === a.id)));
+
+  const fill = (selectId) => {
+    const el = document.getElementById(selectId);
+    if (!el) return;
+    const curr = el.value;
+    el.innerHTML = '';
+    combined.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.innerText = m.name;
+      el.appendChild(opt);
+    });
+    if (curr) el.value = curr;
+  };
+
+  fill('shameMemberSelect');
+  fill('courtDefendantSelect');
+  fill('dossierMemberSelect');
+  fill('protectMemberSelect');
+}
+
+function renderVcRadar(members) {
+  const container = document.getElementById('vcRadarContainer');
+  if (!members.length) {
+    container.innerHTML = '<p style="color:var(--text-muted); padding:1rem;">لا يوجد أحد في الفويس حالياً... الجميع مختبئ!</p>';
+    return;
+  }
+  container.innerHTML = members.map(m => `
+    <div class="member-radar-card">
+      <div class="member-radar-top">
+        <div class="member-radar-info">
+          <img class="member-radar-avatar" src="${m.avatar}" alt="${m.name}">
+          <div>
+            <div class="member-radar-name">${m.name}</div>
+            <div class="member-radar-title">${m.title || 'عضو عادي'}</div>
+          </div>
+        </div>
+        <button class="chip-btn" onclick="quickRoastMember(${m.id})">🎯 اقصفه</button>
+      </div>
+      <div class="badges-row">
+        <span class="badge-chip badge-game">⏱️ ${m.minutes} دقيقة</span>
+        ${m.muted ? '<span class="badge-chip badge-muted">🔇 صامت (Muted)</span>' : ''}
+        ${m.deafened ? '<span class="badge-chip badge-deaf">🦻 أطمش (Deafened)</span>' : ''}
+        ${m.streaming ? '<span class="badge-chip badge-stream">📺 يبث شاشة</span>' : ''}
+        ${m.games && m.games.length ? `<span class="badge-chip badge-game">🎮 ${m.games[0]}</span>` : ''}
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--text-muted); margin-top:0.2rem;">
+        <span>نسبة الكلام: ${m.speak_ratio}%</span>
+        <span>عداد الحقد: 🔥 ${m.grudge}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderRoastFeed(roasts) {
+  const container = document.getElementById('roastFeedContainer');
+  if (!roasts.length) {
+    container.innerHTML = '<p style="color:var(--text-muted); padding:1rem;">لا توجد قذائف مسجلة مؤخراً.</p>';
+    return;
+  }
+  const rev = roasts.slice().reverse().slice(0, 30);
+  container.innerHTML = rev.map(r => `
+    <div class="feed-item">
+      <div class="feed-meta">
+        <span class="feed-member">🎯 الضحية: ${r.member}</span>
+        <span>${new Date(r.time * 1000).toLocaleTimeString('ar-SA')}</span>
+      </div>
+      <div class="feed-roast-text">"${r.roast}"</div>
+    </div>
+  `).join('');
+}
+
+function renderReconAlerts(alerts) {
+  const container = document.getElementById('reconAlertsContainer');
+  if (!alerts.length) {
+    container.innerHTML = '<p style="color:var(--text-muted);">الرادار يمسح السيرفر... لا توجد خروقات حالياً.</p>';
+    return;
+  }
+  container.innerHTML = alerts.map(a => `
+    <div style="background:rgba(255,0,85,0.08); border:1px solid rgba(255,0,85,0.3); border-radius:8px; padding:0.65rem 1rem; font-size:0.85rem; color:#fff;">
+      ${a.msg}
+    </div>
+  `).join('');
+}
+
+function renderDialectCards(dialects, activeId) {
+  const container = document.getElementById('dialectCardsContainer');
+  container.innerHTML = dialects.map(d => {
+    const isSel = d.id === activeId;
+    const m = d.metrics || { sharpness: 85, speed: 90, authenticity: 95, humor: 90 };
+    return `
+      <div class="glass-card dialect-card ${isSel ? 'selected' : ''}" onclick="selectDialect('${d.id}')">
+        <div class="card-header" style="margin-bottom:0.75rem;">
+          <div style="font-size:1.15rem; font-weight:900;">${d.icon} ${d.name}</div>
+          <span class="version-badge" style="color:var(--cyan); border-color:var(--cyan);">${d.badge}</span>
+        </div>
+        <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem;">${d.region}</p>
+
+        <div class="metric-bar-group">
+          <div class="metric-bar-item">
+            <span>حدة القصف</span>
+            <div class="metric-bar-track"><div class="metric-bar-fill" style="width:${m.sharpness}%; background:var(--magenta);"></div></div>
+          </div>
+          <div class="metric-bar-item">
+            <span>سرعة البديهة</span>
+            <div class="metric-bar-track"><div class="metric-bar-fill" style="width:${m.speed}%; background:var(--cyan);"></div></div>
+          </div>
+          <div class="metric-bar-item">
+            <span>أصالة المفردات</span>
+            <div class="metric-bar-track"><div class="metric-bar-fill" style="width:${m.authenticity}%; background:var(--amber);"></div></div>
+          </div>
+          <div class="metric-bar-item">
+            <span>خفة الدم</span>
+            <div class="metric-bar-track"><div class="metric-bar-fill" style="width:${m.humor}%; background:var(--emerald);"></div></div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.75rem;">
+          ${(d.catchphrases || []).slice(0, 3).map(c => `<span class="badge-chip badge-game">${c}</span>`).join('')}
+        </div>
+
+        <div style="margin-top:1rem; text-align:center;">
+          <button class="chip-btn" style="width:100%; justify-content:center; ${isSel ? 'background:var(--cyan); color:#000; border-color:var(--cyan);' : ''}">
+            ${isSel ? '✓ اللهجة النشطة حالياً' : 'تفعيل هذه اللهجة'}
+          </button>
+        </div>
+      </div>
+    `;
   }).join('');
 }
 
-function renderCharts(){
-  if(!D.daily_chart)return;
-  const ctx=document.getElementById('dailyChart');
-  if(dailyChartInstance)dailyChartInstance.destroy();
-  const labels=Object.keys(D.daily_chart).map(d=>{const p=d.split('-');return p[2]+'/'+p[1]});
-  const values=Object.values(D.daily_chart);
-  dailyChartInstance=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'ذبات',data:values,backgroundColor:'rgba(244,63,94,.6)',borderRadius:6,borderSkipped:false}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{color:'#6b7a8d'}},x:{ticks:{color:'#6b7a8d'}}}}});
-}
-
-async function forceRoast(){await fetch('/api/force_roast',{method:'POST'});toast('أمر الذبة انطلق!','ok');setTimeout(loadData,3000)}
-async function toggleLoop(){const r=await fetch('/api/toggle',{method:'POST'});const d=await r.json();toast(d.running?'الذبات شغّالة ▶️':'الذبات متوقفة ⏸️','ok');setTimeout(loadData,1000)}
-
-async function generateAIReport(){
-  const btn = document.getElementById('btn-ai-report');
-  btn.textContent = '⏳ جاري التحليل...'; btn.disabled = true;
-  try {
-    const r = await fetch('/api/ai_report', {method:'POST'});
-    const d = await r.json();
-    if(d.ok && d.report){
-      document.getElementById('ai-report-output').style.display='block';
-      document.getElementById('ai-title').textContent=d.report.title;
-      document.getElementById('ai-toxic').textContent=d.report.toxic_user;
-      document.getElementById('ai-quiet').textContent=d.report.quiet_user;
-      document.getElementById('ai-summary').textContent=d.report.summary;
-      document.getElementById('ai-advice').textContent=d.report.advice;
-      toast('تم استخراج التقرير الذكي ✨','ok');
-    } else {
-      toast('فشل التقرير، تأكد من البيانات','error');
-    }
-  }catch(e){toast('خطأ!','error');}
-  if(btn){ btn.textContent = '✨ توليد تقرير ذكي عن حالة السيرفر'; btn.disabled = false; }
-}
-
-async function buildPersona(){
-  const fileInput = document.getElementById('persona-image');
-  if(!fileInput || !fileInput.files[0]){ toast('اختر صورة أولاً','error'); return; }
-  const btn = document.getElementById('btn-build-persona');
-  btn.textContent = '⏳ جاري الابتكار...'; btn.disabled = true;
-  const formData = new FormData();
-  formData.append('image', fileInput.files[0]);
-  try {
-    const r = await fetch('/api/build_persona', {method:'POST', body:formData});
-    const d = await r.json();
-    if(d.ok){
-      document.getElementById('persona-build-msg').innerHTML = `<span style="color:var(--green)">تم تحويل البوت إلى: <strong>${d.persona.name||'شخصية مجهولة'}</strong> بصوت ${d.persona.voice||'Kore'}</span>`;
-      toast('تم ابتكار الشخصية وتطبيقها بنجاح! 🎭','ok');
-      loadData();
-    } else {
-      toast('فشل الابتكار','error');
-    }
-  }catch(e){toast('خطأ!','error');}
-  if(btn){ btn.textContent = '✨ ابتكار شخصية'; btn.disabled = false; }
-}
-
-
-async function startMinigame(){
-  const typ = document.getElementById('minigame-type').value;
-  const btn = document.getElementById('btn-minigame');
-  btn.textContent = '⏳ جاري الإطلاق...'; btn.disabled = true;
-  try {
-    const r = await fetch('/api/start_minigame', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:typ})});
-    const d = await r.json();
-    if(d.ok){ toast('تم إرسال اللعبة للشات! 🎮','ok'); }
-    else { toast('خطأ: ' + (d.error||'فشل'),'error'); }
-  }catch(e){toast('خطأ!','error');}
-  btn.textContent = '🚀 أطلق اللعبة'; btn.disabled = false;
-}
-
-async function playEffect(eff){
-  try {
-    const r = await fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({effect:eff})});
-    const d = await r.json();
-    if(d.ok){ toast('جاري تشغيل الصوت... 🔊','ok'); }
-    else { toast('خطأ: ' + (d.error||'لا يوجد أحد بالفويس'),'error'); }
-  }catch(e){toast('خطأ!','error');}
-}
-
-async function sendCustom(){
-  const mid=document.getElementById('roast-target').value,txt=document.getElementById('roast-text').value.trim();
-  if(!mid||!txt){showMsg('custom-msg','⚠️ اختر عضو واكتب');return}
-  const r=await fetch('/api/custom_roast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid,text:txt})});
-  const d=await r.json();
-  if(d.ok){toast('الذبة انرسلت! 🚀','ok');document.getElementById('roast-text').value='';setTimeout(loadData,2000)}
-  else showMsg('custom-msg','❌ '+d.error);
-}
-
-async function sendFree(){
-  const txt=document.getElementById('free-text').value.trim();
-  if(!txt){showMsg('free-msg','⚠️ اكتب شيء');return}
-  const r=await fetch('/api/free_message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:txt})});
-  const d=await r.json();
-  if(d.ok){toast('الرسالة انرسلت! 📨','ok');document.getElementById('free-text').value=''}
-  else showMsg('free-msg','❌');
-}
-
-async function targetedRoast(){
-  const mid=document.getElementById('target-member')?.value || document.getElementById('smart-roast-target')?.value;
-  if(!mid){showMsg('status-msg','⚠️ اختر عضو');return}
-  await fetch('/api/targeted_roast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid})});
-  toast('ذبة موجهة انطلقت! 🎯','ok');setTimeout(loadData,3000);
-}
-
-// ─── Dialect Control ─────────────────────────
-function renderDialects(currentDialect, dialects){
-  const cur = (dialects||[]).find(d => d.id === currentDialect) || (dialects ? dialects[0] : null);
-  const headerD = document.getElementById('header-dialect');
-  if(headerD) headerD.textContent = '🗣️ ' + (cur ? cur.badge : 'عامية');
-  const ovD = document.getElementById('ov-dialect-name');
-  if(ovD) ovD.textContent = cur ? cur.name : 'عامية';
-  const ctrlD = document.getElementById('ctrl-dialect-badge');
-  if(ctrlD) ctrlD.textContent = cur ? cur.name : 'عامية';
-
-  // Overview quick buttons
-  ['default','riyadh','jeddah','qassim'].forEach(id => {
-    const b = document.getElementById('btn-dial-' + id);
-    if(b){
-      if(id === currentDialect){
-        b.className = 'btn btn-sm btn-red';
-      } else {
-        b.className = 'btn btn-sm';
-      }
-    }
-  });
-
-  // Dialect Grid Cards
-  const grid = document.getElementById('dialect-grid');
-  if(grid && dialects){
-    grid.innerHTML = dialects.map(d => {
-      const isActive = d.id === currentDialect;
-      return `<div class="dialect-card ${isActive ? 'active' : ''}" onclick="changeDialect('${d.id}')">
-        <span class="dialect-active-indicator">● مفعلة حالياً</span>
-        <div class="dialect-card-top">
-          <div class="dialect-name"><span>${d.icon}</span> <span>${d.name}</span></div>
-          <span class="dialect-badge">${d.badge}</span>
-        </div>
-        <div class="dialect-desc">المنطقة: ${d.region}</div>
-        <div class="dialect-quote">"${d.catchphrase}"</div>
-      </div>`;
-    }).join('');
-  }
-}
-
-async function changeDialect(dialectId){
-  try {
-    const r = await fetch('/api/change_dialect', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dialect: dialectId})
-    });
-    const d = await r.json();
-    if(d.ok){
-      toast('تم تغيير لهجة البوت إلى: ' + d.name + ' 🗣️', 'ok');
-      loadData();
-    } else {
-      toast('فشل تغيير اللهجة: ' + (d.error || ''), 'error');
-    }
-  } catch(e) {
-    toast('خطأ في الاتصال بالسيرفر', 'error');
-  }
-}
-
-// ─── Smart Roast Launcher ────────────────────
-function updateIntensityLabel(val){
-  const labels = {
-    "1": "1 - مداعبة خفيفة وحنونة 😊",
-    "2": "2 - طقطقة خفيفة وودية 😉",
-    "3": "3 - متوازنة وذكية 🎯",
-    "4": "4 - قوية وحارة 🔥",
-    "5": "5 - قصف نووي بدون رحمة 💥💀"
-  };
-  const el = document.getElementById('lbl-intensity');
-  if(el) el.textContent = labels[val] || val;
-}
-
-function applyTopicPreset(val){
-  if(!val || val === 'custom') return;
-  const topicBox = document.getElementById('smart-roast-topic');
-  if(val === 'dossier'){
-    topicBox.value = 'نبش في ملف فضائحه وسوابقه وأعذاره واجلده بها';
-  } else {
-    topicBox.value = val;
-  }
-}
-
-function quickSmartRoast(mid){
-  showPage('control');
-  const sel = document.getElementById('smart-roast-target');
-  if(sel) sel.value = mid;
-  window.scrollTo({top: 200, behavior: 'smooth'});
-}
-
-async function launchSmartRoast(){
-  const mid = document.getElementById('smart-roast-target').value;
-  if(!mid){
-    showMsg('smart-roast-msg', '⚠️ اختر الضحية أولاً');
+function renderHallOfShame(shameList) {
+  const container = document.getElementById('shameLeaderboard');
+  if (!shameList.length) {
+    container.innerHTML = '<p style="color:var(--text-muted); padding:1rem;">لا توجد بيانات عار مسجلة بعد.</p>';
     return;
   }
-  const dialect = document.getElementById('smart-roast-dialect').value;
-  const intensity = document.getElementById('smart-roast-intensity').value;
-  const topic = document.getElementById('smart-roast-topic').value.trim();
-  const playAudio = document.getElementById('smart-roast-audio').checked;
+  container.innerHTML = shameList.map((s, idx) => `
+    <div class="feed-item" style="display:flex; flex-direction:row; align-items:center; justify-content:space-between;">
+      <div style="display:flex; align-items:center; gap:0.75rem;">
+        <span style="font-weight:900; font-size:1.1rem; color:${idx === 0 ? 'var(--amber)' : (idx === 1 ? '#e2e8f0' : '#d97706')};">#${idx + 1}</span>
+        <img src="${s.avatar}" style="width:38px; height:38px; border-radius:8px; object-fit:cover;">
+        <div>
+          <div style="font-weight:800; font-size:0.9rem;">${s.name}</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">${s.title} • أكلها ${s.count} مرة</div>
+        </div>
+      </div>
+      <div style="text-align:left;">
+        <span class="badge-chip badge-muted">🔥 حقد ${s.grudge}</span>
+      </div>
+    </div>
+  `).join('');
+}
 
-  const btn = document.getElementById('btn-smart-roast');
-  btn.textContent = '⏳ جاري التفكير وإطلاق الذبة...';
-  btn.disabled = true;
+function renderProtectedList(list) {
+  const container = document.getElementById('protectedListContainer');
+  if (!list.length) {
+    container.innerHTML = '<p style="color:var(--text-muted);">لا يوجد أي شخص محمي حالياً.</p>';
+    return;
+  }
+  container.innerHTML = list.map(p => `
+    <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.3); padding:0.6rem 0.85rem; border-radius:8px;">
+      <div style="display:flex; align-items:center; gap:0.5rem;">
+        <img src="${p.avatar}" style="width:30px; height:30px; border-radius:6px; object-fit:cover;">
+        <span style="font-size:0.85rem; font-weight:700;">${p.name}</span>
+      </div>
+      <button class="chip-btn" style="padding:2px 8px; font-size:0.75rem;" onclick="removeProtectedMember(${p.id})">إلغاء الحصانة</button>
+    </div>
+  `).join('');
+}
+
+function renderCharts(data) {
+  if (data.daily_chart) {
+    const labels = Object.keys(data.daily_chart);
+    const vals = Object.values(data.daily_chart);
+    if (!dailyChartInstance) {
+      const ctx1 = document.getElementById('dailyRoastChart').getContext('2d');
+      dailyChartInstance = new Chart(ctx1, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'عدد القذائف اليومية',
+            data: vals,
+            backgroundColor: 'rgba(0, 240, 255, 0.4)',
+            borderColor: '#00f0ff',
+            borderWidth: 1.5,
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e', font: { family: 'Cairo' } } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e', stepSize: 1 } }
+          }
+        }
+      });
+    } else {
+      dailyChartInstance.data.labels = labels;
+      dailyChartInstance.data.datasets[0].data = vals;
+      dailyChartInstance.update();
+    }
+  }
+
+  if (data.hourly_activity) {
+    const hLabels = Array.from({length: 24}, (_, i) => `${i}:00`);
+    if (!hourlyChartInstance) {
+      const ctx2 = document.getElementById('hourlyActivityChart').getContext('2d');
+      hourlyChartInstance = new Chart(ctx2, {
+        type: 'line',
+        data: {
+          labels: hLabels,
+          datasets: [{
+            label: 'نشاط الفويس (24 ساعة)',
+            data: data.hourly_activity,
+            borderColor: '#a855f7',
+            backgroundColor: 'rgba(168, 85, 247, 0.15)',
+            fill: true,
+            tension: 0.35,
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e' } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e', stepSize: 1 } }
+          }
+        }
+      });
+    } else {
+      hourlyChartInstance.data.datasets[0].data = data.hourly_activity;
+      hourlyChartInstance.update();
+    }
+  }
+}
+
+// ─── Actions & API Calls ─────────────────────────────────────────────────────
+
+async function forceRandomRoast() {
+  playSound('laser');
+  try {
+    const res = await fetch('/api/force_roast', { method: 'POST' });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('🚀 تم إطلاق قصف عشوائي في السيرفر!');
+      setTimeout(fetchData, 2000);
+    }
+  } catch (e) { showToast('خطأ أثناء إطلاق القصف', 'danger'); }
+}
+
+async function toggleEngineLoop() {
+  playSound('beep');
+  try {
+    const res = await fetch('/api/toggle', { method: 'POST' });
+    const json = await res.json();
+    showToast(json.running ? 'تم تشغيل محرك القصف التلقائي' : 'تم إيقاف محرك القصف التلقائي');
+    fetchData();
+  } catch (e) { showToast('خطأ أثناء تبديل حالة المحرك', 'danger'); }
+}
+
+async function quickRoastMember(memberId) {
+  playSound('laser');
+  try {
+    const res = await fetch('/api/targeted_roast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: memberId, intensity: 4 })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('🚀 تم توجيه قصف مركز على العضو!');
+      setTimeout(fetchData, 2000);
+    } else {
+      showToast(json.error || 'فشل القصف', 'danger');
+    }
+  } catch (e) { showToast('خطأ أثناء القصف', 'danger'); }
+}
+
+async function selectDialect(dialectId) {
+  playSound('beep');
+  try {
+    const res = await fetch('/api/change_dialect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dialect: dialectId })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast(`تم تحويل لهجة مستر ذبات الرسمية إلى: ${json.name} 🗣️`);
+      fetchData();
+    }
+  } catch (e) { showToast('خطأ أثناء تغيير اللهجة', 'danger'); }
+}
+
+// ─── Shame Card Hologram Studio ──────────────────────────────────────────────
+let currentShameSvg = '';
+
+async function previewShameCard() {
+  const memberId = document.getElementById('shameMemberSelect').value;
+  const dialect = document.getElementById('shameDialectSelect').value;
+  if (!memberId) return;
+
+  playSound('beep');
+  showToast('جاري توليد بطاقة العار الرقمية...', 'info');
 
   try {
-    const r = await fetch('/api/targeted_roast', {
+    const res = await fetch('/api/shame_card', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: memberId, dialect: dialect })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      const cd = json.card_data;
+      document.getElementById('cardHoloAvatar').src = cd.avatar || 'https://cdn.discordapp.com/embed/avatars/0.png';
+      document.getElementById('cardHoloName').innerText = cd.name;
+      document.getElementById('cardHoloTitle').innerText = cd.title;
+      document.getElementById('statExcuse').innerText = `${cd.stats.excuses}%`;
+      document.getElementById('statAim').innerText = `${cd.stats.aim}%`;
+      document.getElementById('statChoke').innerText = `${cd.stats.choke}%`;
+      document.getElementById('statSleep').innerText = `${cd.stats.sleep}h`;
+      document.getElementById('cardHoloQuote').innerText = `"${json.roast_text}"`;
+      currentShameSvg = json.svg;
+      showToast('تم تجهيز بطاقة العار بنجاح!');
+    } else {
+      showToast(json.error || 'فشل توليد البطاقة', 'danger');
+    }
+  } catch (e) { showToast('خطأ أثناء تجهيز البطاقة', 'danger'); }
+}
+
+async function sendShameCardToDiscord() {
+  const memberId = document.getElementById('shameMemberSelect').value;
+  const dialect = document.getElementById('shameDialectSelect').value;
+  if (!memberId) return;
+
+  playSound('fanfare');
+  showToast('جاري إرسال بطاقة العار إلى ديسكورد...', 'info');
+
+  try {
+    const res = await fetch('/api/shame_card_send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: memberId, dialect: dialect })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('🚀 تم إرسال بطاقة العار بنجاح إلى القناة العامة!');
+    } else {
+      showToast(json.error || 'فشل الإرسال', 'danger');
+    }
+  } catch (e) { showToast('خطأ أثناء الإرسال للديسكورد', 'danger'); }
+}
+
+function downloadShameCardSvg() {
+  if (!currentShameSvg) {
+    showToast('قم بتوليد بطاقة العار أولاً', 'danger');
+    return;
+  }
+  const blob = new Blob([currentShameSvg], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `shame_card_${Date.now()}.svg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('تم تنزيل ملف SVG بنجاح!');
+}
+
+// ─── Courtroom Actions ───────────────────────────────────────────────────────
+function setCharge(text) {
+  document.getElementById('courtChargeInput').value = text;
+  playSound('beep');
+}
+
+function openQuickCourtModal() {
+  switchTab('courtroom');
+}
+
+async function startCourtTrial() {
+  const defId = document.getElementById('courtDefendantSelect').value;
+  const charge = document.getElementById('courtChargeInput').value.trim();
+  const dialect = document.getElementById('courtDialectSelect').value;
+
+  if (!defId || !charge) {
+    showToast('يرجى تحديد المتهم وكتابة التهمة', 'danger');
+    return;
+  }
+
+  playSound('gavel');
+  showToast('🔨 جاري فتح جلسة المحاكمة وإرسال التصويت للديسكورد...', 'info');
+
+  try {
+    const res = await fetch('/api/court/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ defendant_id: defId, charge: charge, dialect: dialect })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('⚖️ بدأت المحاكمة في الديسكورد! التصويت مفتوح 90 ثانية للأعضاء.');
+      setTimeout(fetchData, 2000);
+    } else {
+      showToast(json.error || 'فشل بدء المحاكمة', 'danger');
+    }
+  } catch (e) { showToast('خطأ أثناء بدء المحاكمة', 'danger'); }
+}
+
+// ─── 1v1 Battle Arena ────────────────────────────────────────────────────────
+async function judgeBattle() {
+  const p1Name = document.getElementById('battleP1Name').value.trim();
+  const p1Roast = document.getElementById('battleP1Roast').value.trim();
+  const p2Name = document.getElementById('battleP2Name').value.trim();
+  const p2Roast = document.getElementById('battleP2Roast').value.trim();
+  const topic = document.getElementById('battleTopicInput').value.trim();
+
+  if (!p1Roast || !p2Roast) {
+    showToast('يرجى كتابة ذبة لكل من المتحديين', 'danger');
+    return;
+  }
+
+  playSound('laser');
+  showToast('الحكم يفحص الجبهات ويقيم الأضرار...', 'info');
+
+  try {
+    const res = await fetch('/api/battle/judge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        member_id: mid,
-        dialect: dialect || null,
-        intensity: parseInt(intensity),
-        topic: topic || null,
-        play_audio: playAudio
+        p1_name: p1Name,
+        p1_roast: p1Roast,
+        p2_name: p2Name,
+        p2_roast: p2Roast,
+        topic: topic
       })
     });
-    const d = await r.json();
-    if(d.ok){
-      toast('تم إطلاق الذبة بنجاح! 🎯🔥', 'ok');
-      showMsg('smart-roast-msg', '✅ تم إرسال الذبة!');
-      setTimeout(loadData, 2500);
+    const json = await res.json();
+    if (json.ok) {
+      playSound('fanfare');
+      const r = json.result;
+      document.getElementById('battleVerdictContainer').style.display = 'block';
+      document.getElementById('battleWinnerTitle').innerText = `🏆 الفائز بالضربة القاضية: ${r.winner || 'تعادل'}`;
+      document.getElementById('battleScoresTxt').innerText = `النقاط: ${p1Name} (${r.score1 || 0}/10) | ${p2Name} (${r.score2 || 0}/10)`;
+      document.getElementById('battleCommentaryTxt').innerText = r.commentary || r.verdict || '';
+      showToast('تم صدور قرار الحكم الرسمي!');
     } else {
-      showMsg('smart-roast-msg', '❌ ' + (d.error || 'فشل'));
+      showToast(json.error || 'فشل التحكيم', 'danger');
     }
-  } catch(e) {
-    showMsg('smart-roast-msg', '❌ خطأ بالاتصال');
-  }
-  btn.textContent = '🚀 أطلق الذبة الذكية';
-  btn.disabled = false;
+  } catch (e) { showToast('خطأ أثناء تحكيم المعركة', 'danger'); }
 }
 
-// ─── User Dossier Modal ──────────────────────
-let currentDossierMid = null;
+// ─── 4-Way Comparative Simulator ─────────────────────────────────────────────
+async function runComparativeSim() {
+  const topic = document.getElementById('simTopicInput').value.trim();
+  if (!topic) {
+    showToast('يرجى كتابة الموقف للمحاكاة', 'danger');
+    return;
+  }
 
-async function openDossierModal(mid, name, avatar){
-  currentDossierMid = mid;
-  document.getElementById('dm-name').textContent = name || 'عضو';
-  document.getElementById('dm-id').textContent = 'ID: ' + mid;
-  document.getElementById('dm-avatar').src = avatar || '';
-  document.getElementById('dossier-modal').classList.add('open');
-
-  document.getElementById('dm-titles').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
-  document.getElementById('dm-excuses').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
-  document.getElementById('dm-moments').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
+  playSound('beep');
+  showToast('جاري استدعاء الـ 4 لهجات في نفس اللحظة...', 'info');
 
   try {
-    const r = await fetch('/api/dossier?member_id=' + mid);
-    const d = await r.json();
-    if(d.ok && d.dossier){
-      renderDossierData(d.dossier);
-    }
-  } catch(e){
-    console.error(e);
-  }
-}
-
-function renderDossierData(d){
-  const titles = d.titles || [];
-  const excuses = d.excuses || [];
-  const moments = d.embarrassing_moments || [];
-
-  const tEl = document.getElementById('dm-titles');
-  tEl.innerHTML = titles.length ? titles.map(t => `<span class="badge badge-yellow">👑 ${t}</span>`).join(' ') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد ألقاب مسجلة</span>';
-
-  const eEl = document.getElementById('dm-excuses');
-  eEl.innerHTML = excuses.length ? excuses.map(e => `<div class="dossier-tag" style="border-right:3px solid var(--blue)">🤥 "${e}"</div>`).join('') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد أعذار مسجلة</span>';
-
-  const mEl = document.getElementById('dm-moments');
-  mEl.innerHTML = moments.length ? moments.map(m => `<div class="dossier-tag" style="border-right:3px solid var(--accent)">🙈 ${m}</div>`).join('') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد فضائح مسجلة</span>';
-}
-
-function closeDossierModal(){
-  document.getElementById('dossier-modal').classList.remove('open');
-  currentDossierMid = null;
-}
-
-function openSelectedDossier(){
-  const sel = document.getElementById('dossier-member-select');
-  const mid = sel.value;
-  if(!mid){ toast('اختر عضواً أولاً', 'error'); return; }
-  const opt = sel.options[sel.selectedIndex];
-  const name = opt ? opt.text : 'عضو';
-  const mem = (D.all_members||[]).find(m => String(m.id) === String(mid));
-  openDossierModal(mid, name, mem ? mem.avatar : '');
-}
-
-async function addDossierItem(){
-  if(!currentDossierMid) return;
-  const typ = document.getElementById('dm-add-type').value;
-  const txt = document.getElementById('dm-add-text').value.trim();
-  if(!txt){ toast('اكتب النص أولاً', 'error'); return; }
-
-  try {
-    const r = await fetch('/api/dossier/add', {
+    const res = await fetch('/api/dialect/preview', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        member_id: currentDossierMid,
-        type: typ,
-        content: txt
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topic })
     });
-    const d = await r.json();
-    if(d.ok && d.dossier){
-      renderDossierData(d.dossier);
-      document.getElementById('dm-add-text').value = '';
-      toast('تم حفظ المعلومة في ملف العار! 📂', 'ok');
-    } else {
-      toast('فشل الحفظ: ' + (d.error||''), 'error');
+    const json = await res.json();
+    if (json.ok) {
+      playSound('laser');
+      const c = json.comparisons;
+      document.getElementById('comparativeResults').innerHTML = `
+        <div class="sim-card" style="border-color:var(--cyan);">
+          <div class="sim-card-header"><span style="color:var(--cyan);">⚡ عامية معاصرة</span></div>
+          <p style="font-size:0.9rem; line-height:1.5;">${c.default || '-'}</p>
+        </div>
+        <div class="sim-card" style="border-color:var(--amber);">
+          <div class="sim-card-header"><span style="color:var(--amber);">🇸🇦 الرياض / نجدية</span></div>
+          <p style="font-size:0.9rem; line-height:1.5;">${c.riyadh || '-'}</p>
+        </div>
+        <div class="sim-card" style="border-color:var(--emerald);">
+          <div class="sim-card-header"><span style="color:var(--emerald);">🌴 جدة / حجازية</span></div>
+          <p style="font-size:0.9rem; line-height:1.5;">${c.jeddah || '-'}</p>
+        </div>
+        <div class="sim-card" style="border-color:var(--magenta);">
+          <div class="sim-card-header"><span style="color:var(--magenta);">🌾 القصيم</span></div>
+          <p style="font-size:0.9rem; line-height:1.5;">${c.qassim || '-'}</p>
+        </div>
+      `;
+      showToast('تمت المحاكاة بـ 4 لهجات بنجاح!');
     }
-  } catch(e){
-    toast('خطأ بالاتصال', 'error');
+  } catch (e) { showToast('خطأ أثناء تشغيل المحاكي', 'danger'); }
+}
+
+// ─── Dossier Manager ─────────────────────────────────────────────────────────
+async function loadUserDossier() {
+  const uid = document.getElementById('dossierMemberSelect').value;
+  if (!uid) return;
+
+  try {
+    const res = await fetch(`/api/dossier?member_id=${uid}`);
+    const json = await res.json();
+    if (json.ok) {
+      const d = json.dossier;
+      const renderList = (listId, items) => {
+        const el = document.getElementById(listId);
+        if (!items || !items.length) {
+          el.innerHTML = '<li style="color:var(--text-muted);">لا توجد عناصر</li>';
+          return;
+        }
+        el.innerHTML = items.map(it => `<li>• ${it}</li>`).join('');
+      };
+      renderList('dossierTitlesList', d.titles);
+      renderList('dossierExcusesList', d.excuses);
+      renderList('dossierMomentsList', d.embarrassing_moments);
+      renderList('dossierCrimesList', d.crimes);
+    }
+  } catch (e) { console.error('Dossier fetch error:', e); }
+}
+
+async function addDossierEntry() {
+  const uid = document.getElementById('dossierMemberSelect').value;
+  const type = document.getElementById('dossierAddType').value;
+  const content = document.getElementById('dossierAddContent').value.trim();
+
+  if (!uid || !content) {
+    showToast('يرجى إدخال محتوى السابقة', 'danger');
+    return;
   }
+
+  playSound('beep');
+  try {
+    const res = await fetch('/api/dossier/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: uid, type: type, content: content })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('تم توثيق السابقة في ملف العضو بنجاح!');
+      document.getElementById('dossierAddContent').value = '';
+      loadUserDossier();
+    }
+  } catch (e) { showToast('خطأ أثناء إضافة السابقة', 'danger'); }
 }
 
-async function changeInterval(){
-  const mn=+document.getElementById('slider-min').value,mx=+document.getElementById('slider-max').value;
-  const r=await fetch('/api/change_interval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({min:mn,max:mx})});
-  const d=await r.json();
-  if(d.ok){toast('تم تغيير الوقت: '+d.min+'–'+d.max+' دقيقة','ok')}
+// ─── Protected VIPs ──────────────────────────────────────────────────────────
+async function addProtectedMember() {
+  const uid = document.getElementById('protectMemberSelect').value;
+  if (!uid) return;
+  playSound('beep');
+  try {
+    const res = await fetch('/api/protect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: uid, action: 'add' })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('تم منح الحصانة المطلقة للعضو!');
+      fetchData();
+    }
+  } catch (e) { showToast('خطأ أثناء إضافة الحصانة', 'danger'); }
 }
 
-async function changeVoice(){
-  const v=document.getElementById('voice-select').value;
-  const r=await fetch('/api/change_voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:v})});
-  const d=await r.json();
-  if(d.ok){toast('تم تغيير صوت البوت لـ '+v+' 🎙️','ok');showMsg('voice-msg','✅ تم تغيير الصوت')}
+async function removeProtectedMember(uid) {
+  playSound('beep');
+  try {
+    const res = await fetch('/api/protect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_id: uid, action: 'remove' })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast('تم إلغاء الحصانة عن العضو!');
+      fetchData();
+    }
+  } catch (e) { showToast('خطأ أثناء إلغاء الحصانة', 'danger'); }
 }
 
-async function changePersona(){
-  const p=document.getElementById('persona-select').value;
-  const pName=document.getElementById('persona-select').options[document.getElementById('persona-select').selectedIndex].text;
-  const r=await fetch('/api/change_persona',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({persona:p})});
-  const d=await r.json();
-  if(d.ok){toast('شخصية البوت صارت: '+pName+' 🎭','ok')}
+// ─── AI Intelligence Server Report ──────────────────────────────────────────
+async function generateAiReport() {
+  playSound('laser');
+  showToast('جاري استخراج التقرير الاستخباراتي الساخر بالذكاء الاصطناعي...', 'info');
+  try {
+    const res = await fetch('/api/ai_report', { method: 'POST' });
+    const json = await res.json();
+    if (json.ok) {
+      playSound('fanfare');
+      const r = json.report;
+      alert(`📊 ${r.title}\n\n• أكثر عضو انجلد: ${r.toxic_user}\n• أصنم عضو: ${r.quiet_user}\n\n📝 الملخص:\n${r.summary}\n\n💡 نصيحة للإدمن:\n${r.advice}`);
+    } else {
+      showToast(json.error || 'فشل توليد التقرير', 'danger');
+    }
+  } catch (e) { showToast('خطأ أثناء توليد التقرير', 'danger'); }
 }
 
-async function addProtect(){
-  const mid=document.getElementById('prot-select').value;
-  if(!mid)return;
-  await fetch('/api/protect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:+mid,action:'add'})});
-  toast('تمت الحماية 🛡️','ok');setTimeout(loadData,1000);
+// ─── Cyber CLI Terminal ──────────────────────────────────────────────────────
+function toggleCliModal() {
+  const modal = document.getElementById('cyberCliModal');
+  const isShown = modal.style.display === 'flex';
+  modal.style.display = isShown ? 'none' : 'flex';
+  playSound('beep');
+  if (!isShown) document.getElementById('cliInput').focus();
 }
 
-async function removeProtect(mid){
-  await fetch('/api/protect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid,action:'remove'})});
-  toast('تمت إزالة الحماية','ok');setTimeout(loadData,1000);
-}
+async function handleCliKey(e) {
+  if (e.key === 'Enter') {
+    const input = document.getElementById('cliInput');
+    const cmd = input.value.trim();
+    if (!cmd) return;
+    input.value = '';
 
-function showMsg(id,msg){const e=document.getElementById(id);e.textContent=msg;setTimeout(()=>e.textContent='',4000)}
+    const out = document.getElementById('cliOutput');
+    out.innerText += `\n> ${cmd}`;
 
-async function toggleVoiceJoin(){
-  const r=await fetch('/api/stats');const d=await r.json();
-  const newVal = !d.voice_join_allowed;
-  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({join_allowed:newVal})});
-  toast(newVal?'البوت يقدر يدخل الفويس 🔓':'البوت ممنوع من الفويس 🔒','ok');setTimeout(loadData,500);
-}
-async function toggleProactiveAudio(){
-  const r=await fetch('/api/stats');const d=await r.json();
-  const newVal = !d.voice_proactive_audio;
-  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proactive_audio:newVal})});
-  toast(newVal?'الدخول الاستباقي مفعل 🥷':'الدخول الاستباقي معطل 🛑','ok');setTimeout(loadData,500);
-}
-async function kickVoice(){
-  await fetch('/api/voice_kick',{method:'POST'});toast('تم طرد البوت من الفويس 🚪','ok');setTimeout(loadData,1000);
-}
-async function saveVoiceSettings(){
-  const leave=+document.getElementById('slider-leave').value;
-  const mode=document.getElementById('voice-mode-select').value;
-  await fetch('/api/voice_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_leave_sec:leave,ai_mode:mode})});
-  toast('تم حفظ إعدادات المحادثة الصوتية ✅','ok');showMsg('voice-settings-msg','✅ تم الحفظ');
-}
-async function addVoiceIgnore(){
-  const mid=document.getElementById('voice-ignore-select').value;if(!mid)return;
-  await fetch('/api/voice_ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:+mid,action:'add'})});
-  toast('تم تجاهل العضو 🔇','ok');setTimeout(loadData,500);
-}
-async function removeVoiceIgnore(mid){
-  await fetch('/api/voice_ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid,action:'remove'})});
-  toast('تمت إزالة التجاهل','ok');setTimeout(loadData,500);
-}
-
-loadData();setInterval(loadData,20000);
-
-// ─── Debug Tab ───
-let debugInterval=null;
-async function loadDebug(){
-  try{
-    const r=await fetch('/api/voice_debug');
-    const d=await r.json();
-    if(d.status==='no_active_session'){
-      document.getElementById('dbg-status').innerHTML='<span style="color:#ef4444">⚫ لا توجد جلسة</span>';
-      document.getElementById('dbg-speaker').textContent='—';
-      document.getElementById('dbg-playing').textContent='—';
-      document.getElementById('dbg-recv').textContent='0';
-      document.getElementById('dbg-sent').textContent='0';
-      document.getElementById('dbg-gemini').textContent='0';
-      document.getElementById('dbg-buffer').textContent='0 bytes';
-      document.getElementById('dbg-lastact').textContent='—';
-      document.getElementById('dbg-participants').textContent='—';
-      document.getElementById('dbg-log').innerHTML='<div class="empty">لا توجد جلسة نشطة</div>';
-      document.getElementById('dbg-log-count').textContent='0';
+    if (cmd.toLowerCase() === 'clear') {
+      out.innerText = 'Terminal cleared.';
       return;
     }
-    const s=Object.values(d)[0];
-    document.getElementById('dbg-status').innerHTML=s.running?'<span style="color:#22c55e">🟢 شغّال</span>':'<span style="color:#ef4444">⚫ متوقف</span>';
-    document.getElementById('dbg-speaker').textContent=s.active_speaker||'ما حد';
-    document.getElementById('dbg-playing').innerHTML=s.is_playing?'<span style="color:#f59e0b">🔊 نعم</span>':'<span style="color:#64748b">🔇 لا</span>';
-    document.getElementById('dbg-recv').textContent=s.audio_recv_count||0;
-    document.getElementById('dbg-sent').textContent=s.audio_send_count||0;
-    document.getElementById('dbg-gemini').textContent=s.gemini_recv_count||0;
-    document.getElementById('dbg-buffer').textContent=(s.input_buffer_bytes||0)+' bytes';
-    document.getElementById('dbg-lastact').textContent=(s.last_activity_ago||0)+'s ago';
-    document.getElementById('dbg-participants').textContent=(s.participants||[]).join('، ')||'ما حد';
-    const log=s.log||[];
-    document.getElementById('dbg-log-count').textContent=log.length;
-    const colors={SESSION_START:'#22c55e',AUDIO_SENT:'#3b82f6',GEMINI_RESPONSE:'#a855f7',PLAY_START:'#f59e0b',PLAY_CONVERTED:'#f59e0b',PLAY_DONE:'#06b6d4'};
-    document.getElementById('dbg-log').innerHTML=log.length?log.slice().reverse().map(e=>{
-      const c=colors[e.event]||'#94a3b8';
-      return '<div style="padding:2px 4px;border-bottom:1px solid var(--border)"><span style="color:#64748b">'+e.elapsed+'s</span> <span style="color:'+c+';font-weight:bold">'+e.event+'</span> <span style="color:var(--text)">'+e.detail+'</span></div>';
-    }).join(''):'<div class="empty">لا توجد أحداث</div>';
-  }catch(e){console.error('Debug load error:',e)}
+
+    try {
+      const res = await fetch('/api/cli/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd })
+      });
+      const json = await res.json();
+      out.innerText += `\n${json.output || 'OK'}`;
+      out.scrollTop = out.scrollHeight;
+    } catch (err) {
+      out.innerText += `\nERR: ${err.message}`;
+    }
+  }
 }
+
+// ─── Boot Sequence ───────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  fetchData();
+  setInterval(fetchData, 5000);
+});
 </script>
 </body>
 </html>"""
-
 
 async def handle_index(request):
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
@@ -1839,37 +2828,34 @@ async def handle_index(request):
 def create_web_app(bot_instance) -> web.Application:
     app = web.Application()
     app["bot"] = bot_instance
-    app.router.add_get("/",                   handle_index)
-    app.router.add_get("/api/stats",          handle_stats)
-    app.router.add_post("/api/force_roast",   handle_force_roast)
-    app.router.add_post("/api/toggle",        handle_toggle)
-    app.router.add_post("/api/custom_roast",  handle_custom_roast)
-    app.router.add_post("/api/free_message",  handle_free_message)
-    app.router.add_post("/api/targeted_roast",handle_targeted_roast)
-    app.router.add_post("/api/change_interval",handle_change_interval)
-    app.router.add_post("/api/change_voice",  handle_change_voice)
-    app.router.add_post("/api/change_persona",handle_change_persona)
-    app.router.add_post("/api/change_dialect",handle_change_dialect)
-    app.router.add_get("/api/dossier",        handle_dossier)
-    app.router.add_post("/api/dossier/add",   handle_add_dossier_item)
-    app.router.add_post("/api/voice_settings", handle_voice_settings)
-    app.router.add_post("/api/voice_ignore",   handle_voice_ignore)
-    app.router.add_post("/api/voice_kick",     handle_voice_kick)
-    app.router.add_post("/api/protect",       handle_protect)
-    app.router.add_get("/api/voice_debug",    handle_voice_debug)
-    app.router.add_post("/api/ai_report",     handle_ai_report)
-    app.router.add_post("/api/build_persona", handle_build_persona)
-    app.router.add_post("/api/start_minigame",handle_start_minigame)
-    app.router.add_post("/api/soundboard",    handle_soundboard)
+    app.router.add_get("/",                     handle_index)
+    app.router.add_get("/api/stats",            handle_stats)
+    app.router.add_post("/api/toggle",          handle_toggle)
+    app.router.add_post("/api/force_roast",     handle_force_roast)
+    app.router.add_post("/api/targeted_roast",  handle_targeted_roast)
+    app.router.add_post("/api/custom_roast",    handle_custom_roast)
+    app.router.add_post("/api/free_message",    handle_free_message)
+    app.router.add_post("/api/change_dialect",  handle_change_dialect)
+    app.router.add_post("/api/change_interval", handle_change_interval)
+    app.router.add_post("/api/protect",         handle_protect)
+    app.router.add_get("/api/dossier",          handle_dossier)
+    app.router.add_post("/api/dossier/add",     handle_add_dossier_item)
+    app.router.add_post("/api/shame_card",      handle_shame_card)
+    app.router.add_post("/api/shame_card_send", handle_shame_card_send)
+    app.router.add_post("/api/court/start",     handle_court_start)
+    app.router.add_post("/api/battle/judge",    handle_battle_judge)
+    app.router.add_post("/api/dialect/preview", handle_dialect_preview)
+    app.router.add_post("/api/ai_report",       handle_ai_report)
+    app.router.add_post("/api/cli/execute",     handle_cli_execute)
     return app
 
 
 async def start_web_server(bot_instance):
     bot_instance._start_time = time.time()
     port = int(os.environ.get("PORT", 8080))
-    app  = create_web_app(bot_instance)
+    app = create_web_app(bot_instance)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web dashboard running on port {port}")
+    print(f"Mr. Roast OS 3.0 Web Dashboard running on port {port}")

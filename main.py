@@ -1,23 +1,24 @@
-import discord
-from discord.ext import commands, tasks
-import os
+﻿"""
+main.py - بوت مستر ذبات 3.0 (Roast Lab & The Ambush Engine)
+تركيز 100% على الذبات، المحاكمات، حلبات الـ 1v1، وبطاقات العار البصرية بدون أي تبعيات صوتية.
+"""
 import asyncio
 import io
-import struct
-import tempfile
-import traceback
-import wave
 import json
-import time
+import os
 import random
+import time
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
-from dashboard_ui import DashboardView
-from web_dashboard import start_web_server
-from voice_chat import VoiceChatSession, HAS_VOICE_RECV
+
 from modules.dialects import DIALECTS, get_dialect_prompt
 from modules.dossier import dossier_mgr
+from modules.roast_engine import roast_engine
+from web_dashboard import start_web_server
 
 # Load environment variables
 load_dotenv()
@@ -26,16 +27,15 @@ DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY")
 ADMIN_USER_ID   = int(os.getenv("ADMIN_USER_ID", 0))
 MAIN_CHANNEL_ID = int(os.getenv("MAIN_CHANNEL_ID", 0))
-AFK_CHANNEL_ID  = 782986605148635166  # روم AFK - البوت يتجاهل الأعضاء فيه
+AFK_CHANNEL_ID  = 782986605148635166  # روم AFK - يتجاهل الأعضاء فيه
 
-# Gemini clients
-client         = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME     = "gemini-flash-latest"   # نموذج توليد النص
-TTS_MODEL_NAME = "gemini-2.5-flash-preview-tts"  # نموذج الصوت
+# Gemini client
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_NAME = "gemini-flash-latest"
 
 
 async def generate_content_ai(contents, system_instruction=None):
-    """توليد النص باستخدام Gemini مع التفكير العالي وأداة البحث في قوقل وآلية احتياطية."""
+    """توليد النص باستخدام Gemini Flash مع التفكير العالي وأداة البحث في قوقل وآلية احتياطية."""
     try:
         cfg = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
@@ -46,7 +46,7 @@ async def generate_content_ai(contents, system_instruction=None):
             model=MODEL_NAME, contents=contents, config=cfg
         )
     except Exception as e:
-        print(f"Generation with search tool failed ({e}), retrying without search...")
+        print(f"Generation with search tool failed ({e}), retrying with thinking only...")
         cfg_fallback = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
             system_instruction=system_instruction,
@@ -58,71 +58,118 @@ async def generate_content_ai(contents, system_instruction=None):
 
 # Configure Intents
 intents = discord.Intents.default()
-intents.voice_states  = True
-intents.members       = True
-intents.guilds        = True
-intents.presences     = True
+intents.voice_states    = True
+intents.members         = True
+intents.guilds          = True
+intents.presences       = True
 intents.message_content = True
+
+
+class CourtVoteView(discord.ui.View):
+    """أزرار التصويت لمحكمة السيرفر."""
+    def __init__(self, defendant_id: int, defendant_name: str, charge: str, bot_instance):
+        super().__init__(timeout=90)
+        self.defendant_id = defendant_id
+        self.defendant_name = defendant_name
+        self.charge = charge
+        self.bot = bot_instance
+        self.guilty_votes = set()
+        self.innocent_votes = set()
+
+    @discord.ui.button(label="🔨 مذنب ويستحق الجلد (0)", style=discord.ButtonStyle.danger, custom_id="vote_guilty")
+    async def vote_guilty(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        self.innocent_votes.discard(uid)
+        self.guilty_votes.add(uid)
+        button.label = f"🔨 مذنب ويستحق الجلد ({len(self.guilty_votes)})"
+        # تحديث الزر الثاني
+        for child in self.children:
+            if child.custom_id == "vote_innocent":
+                child.label = f"🕊️ بريء ومظلوم ({len(self.innocent_votes)})"
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="🕊️ بريء ومظلوم (0)", style=discord.ButtonStyle.secondary, custom_id="vote_innocent")
+    async def vote_innocent(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        self.guilty_votes.discard(uid)
+        self.innocent_votes.add(uid)
+        button.label = f"🕊️ بريء ومظلوم ({len(self.innocent_votes)})"
+        for child in self.children:
+            if child.custom_id == "vote_guilty":
+                child.label = f"🔨 مذنب ويستحق الجلد ({len(self.guilty_votes)})"
+        await interaction.response.edit_message(view=self)
+
+    async def on_timeout(self):
+        # انتهاء وقت التصويت وإعلان الحكم
+        guilty_count = len(self.guilty_votes)
+        innocent_count = len(self.innocent_votes)
+        
+        target_channel = self.bot.get_channel(MAIN_CHANNEL_ID)
+        if not target_channel and self.bot.guilds:
+            target_channel = self.bot.guilds[0].system_channel
+
+        if guilty_count >= innocent_count:
+            # تنفيذ الحكم
+            dossier_mgr.add_crime(self.defendant_id, self.charge)
+            verdict_msg = f"⚖️ **نطق بالحكم الرسمي:** بأغلبية {guilty_count} صوت مقابل {innocent_count}... ثبتت إدانة المتهم <@{self.defendant_id}> بالتهمة المنسوبة إليه!\n🔥 العقوبة: الجلد الساخر الفوري وإدراج الجريمة في ملف سوابقه الجنائية!"
+            if target_channel:
+                await target_channel.send(verdict_msg)
+                # إطلاق ذبة الحكم
+                for g in self.bot.guilds:
+                    m = g.get_member(self.defendant_id)
+                    if m:
+                        await self.bot.generate_roast_for_member(m, target_channel, custom_topic=f"حكم إدانة من المحكمة بتهمة {self.charge}", custom_intensity=5)
+                        break
+        else:
+            if target_channel:
+                await target_channel.send(f"🕊️ **حكم المحكمة:** تم تبرئة <@{self.defendant_id}> بأغلبية أصوات المحلفين ({innocent_count} صوت)! لكن عيون مستر ذبات لا تغفل عنك...")
 
 
 class RoastBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        self.vc_join_times     = {}   # {user_id: join_timestamp}
-        self.last_roasted_user = None
-        self.user_game_history = {}   # {user_id: set of game names}
-        self.daily_stats       = {}   # {user_id: total_minutes_today}
-        self.roast_log         = []   # [(timestamp, member_name, roast_text)]  – kept for web dashboard
+        self.vc_join_times        = {}   # {user_id: join_timestamp}
+        self.last_roasted_user    = None
+        self.user_game_history    = {}   # {user_id: set of game names}
+        self.daily_stats          = {}   # {user_id: total_minutes_today}
+        self.roast_log            = []   # [(timestamp, member_name, roast_text)]
 
-        # إحصائيات متقدمة للداشبورد
-        self.roast_count_per_user = {}  # {user_id: count} – لوحة العار
-        self.daily_roast_counts  = {}   # {"YYYY-MM-DD": count} – رسم بياني
-        self.hourly_vc_activity  = [0]*24  # [عدد الدخلات لكل ساعة] – أوقات الذروة
-        self.game_popularity     = {}   # {game_name: play_count} – ألعاب شعبية
-        self.grudge_levels       = {}   # {user_id: score} - نظام الحقد والذاكرة للأعضاء
-        
-        self.data_file = "bot_data.json"
+        self.roast_count_per_user = {}  # {user_id: count}
+        self.daily_roast_counts   = {}   # {"YYYY-MM-DD": count}
+        self.hourly_vc_activity   = [0]*24
+        self.game_popularity      = {}   # {game_name: play_count}
+        self.grudge_levels        = {}   # {user_id: score}
+
+        self.data_file            = "bot_data.json"
         self.load_data()
 
-        self.protected_users     = set()  # قائمة الحماية
-        self.last_roast_time     = None   # آخر ذبة متى
-        self.roast_interval_min  = 120    # أدنى فترة (دقائق)
-        self.roast_interval_max  = 240    # أقصى فترة (دقائق)
-        self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
-        self.current_persona     = "troll" # شخصية البوت (troll, boomer, tryhard, psycho)
-        self.current_persona_custom = None # إذا تم إنشاء شخصية بصرية عبر الداشبورد
-        self.current_dialect     = "default" # اللهجة الحالية (default, riyadh, jeddah, qassim)
-        self.dossier_mgr         = dossier_mgr
-        self.user_speak_history  = {}     # {user_id: {"unmuted_sec": 0, "last_unmute": 0}} لتتبع نسبة الكلام
-        self.server_memory       = {}     # {guild_id: [رسالة]} ذاكرة السيرفر للتعليق عليها
+        self.protected_users      = set()
+        self.last_roast_time      = None
+        self.roast_interval_min   = 120
+        self.roast_interval_max   = 240
+        self.current_persona      = "troll"
+        self.current_persona_custom = None
+        self.current_dialect      = "default"
+        self.dossier_mgr          = dossier_mgr
+        self.roast_engine         = roast_engine
+        self.server_memory        = {}
+        self.user_speak_history   = {}
+        self._start_time          = time.time()
 
-        # محادثة صوتية تفاعلية
-        self.voice_join_allowed       = True   # هل يسمح للبوت بدخول الفويس
-        self.voice_proactive_audio    = False  # هل يدخل فجأة يسمع ويذب (الاستباقي)
-        self.voice_auto_leave_sec     = 120    # مدة الخروج التلقائي بالثواني
-        self.voice_ai_mode            = "helper"  # helper / roaster / dj
-        self.voice_ignored_users      = set()  # أعضاء البوت ما يرد عليهم
-        self.voice_sessions           = {}     # {guild_id: VoiceChatSession}
-        self.voice_session_log        = []     # سجل المحادثات الصوتية
-        self.voice_conversation_memory = {}    # {user_id: [مواضيع]} ذاكرة المحادثات
-
-        self._start_time         = time.time()
-
-    # ─── Data Management ──────────────────────────────────────────────────────
-        
     def load_data(self):
         try:
-            with open(self.data_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                self.roast_log = data.get("roast_log", [])[-100:]
-                self.roast_count_per_user = {int(k): v for k, v in data.get("roast_count_per_user", {}).items()}
-                self.daily_roast_counts = data.get("daily_roast_counts", {})
-                self.hourly_vc_activity = data.get("hourly_vc_activity", [0]*24)
-                self.game_popularity = data.get("game_popularity", {})
-                self.grudge_levels = {int(k): v for k, v in data.get("grudge_levels", {}).items()}
-                self.current_dialect = data.get("current_dialect", "default")
-        except Exception:
-            pass
+            if os.path.exists(self.data_file):
+                with open(self.data_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.roast_log = data.get("roast_log", [])[-100:]
+                    self.roast_count_per_user = {int(k): v for k, v in data.get("roast_count_per_user", {}).items()}
+                    self.daily_roast_counts = data.get("daily_roast_counts", {})
+                    self.hourly_vc_activity = data.get("hourly_vc_activity", [0]*24)
+                    self.game_popularity = data.get("game_popularity", {})
+                    self.grudge_levels = {int(k): v for k, v in data.get("grudge_levels", {}).items()}
+                    self.current_dialect = data.get("current_dialect", "default")
+        except Exception as e:
+            print(f"Data load error: {e}")
 
     def save_data(self):
         try:
@@ -140,75 +187,53 @@ class RoastBot(commands.Bot):
         except Exception as e:
             print(f"Data save error: {e}")
 
-    # ─── Setup ────────────────────────────────────────────────────────────────
-
     async def setup_hook(self):
         await self.tree.sync()
-        # الذبات مقفلة by default – افتحها من الداشبورد
-        # self.roast_loop.start()
         self.daily_report_loop.start()
-        self.proactive_audio_loop.start()
+        print("Slash commands synced successfully.")
 
     async def on_ready(self):
-        print(f"Logged in as {self.user.name} ({self.user.id})")
-        # تحميل Opus عند البداية عشان تشتغل ميزة الفويس
-        for lib_name in ('libopus.so.0', 'libopus.so', 'opus', 'libopus-0.x86.dll', 'libopus-0.x64.dll'):
-            try:
-                discord.opus.load_opus(lib_name)
-                print(f"Opus loaded: {lib_name}")
-                break
-            except Exception:
-                continue
+        print(f"Logged in as {self.user.name} ({self.user.id}) - Mr. Roast 3.0 Ready!")
         for guild in self.guilds:
             for vc in guild.voice_channels:
                 for member in vc.members:
                     if not member.bot:
                         self.vc_join_times[member.id] = time.time() - 1800
 
-    # ─── Voice / Presence tracking ────────────────────────────────────────────
+    # ─── Presence & Activity Tracking ─────────────────────────────────────────
 
     async def on_voice_state_update(self, member, before, after):
         if member.bot:
             return
         if before.channel is None and after.channel is not None:
             if after.channel.id == AFK_CHANNEL_ID:
-                return  # تجاهل روم AFK
-            self.vc_join_times[member.id]    = time.time()
+                return
+            self.vc_join_times[member.id] = time.time()
             self.user_game_history[member.id] = set()
-            # تتبع أوقات الذروة (بتوقيت السعودية)
             saudi_hour = (time.gmtime().tm_hour + 3) % 24
             self.hourly_vc_activity[saudi_hour] += 1
-            if not before.channel and getattr(after, 'self_mute', False) is False:
-                # دخل الروم وهو من الأساس فاك المايك
-                self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": time.time()}
-            else:
-                self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": 0}
+            self.user_speak_history[member.id] = {"unmuted_sec": 0, "last_unmute": 0}
 
         elif before.channel is not None and after.channel is None:
-            # طلع من الفويس
             join_time = self.vc_join_times.pop(member.id, None)
-            spk = self.user_speak_history.pop(member.id, None)
+            self.user_speak_history.pop(member.id, None)
             self.user_game_history.pop(member.id, None)
             if join_time:
                 mins = int((time.time() - join_time) / 60)
                 self.daily_stats[member.id] = self.daily_stats.get(member.id, 0) + mins
 
-        # تتبع الميوت / فك الميوت (لحساب نسبة السوالف)
+        # تتبع الميوت والسكوت
         if before.channel == after.channel and before.channel is not None:
             spk = self.user_speak_history.setdefault(member.id, {"unmuted_sec": 0, "last_unmute": 0})
             was_muted = getattr(before, 'self_mute', False) or getattr(before, 'mute', False)
             is_muted = getattr(after, 'self_mute', False) or getattr(after, 'mute', False)
-
             if was_muted and not is_muted:
-                # فك الميوت وبدأ يتكلم أو يسمع بصوت
                 spk["last_unmute"] = time.time()
             elif not was_muted and is_muted:
-                # صك ميوت
                 if spk["last_unmute"] > 0:
                     spk["unmuted_sec"] += (time.time() - spk["last_unmute"])
                     spk["last_unmute"] = 0
-            
-        # حفظ البيانات بعد تحديث الإحصائيات المهمة
+
         self.save_data()
 
     async def on_presence_update(self, before, after):
@@ -219,396 +244,159 @@ class RoastBot(commands.Bot):
             for activity in after.activities:
                 if activity.type == discord.ActivityType.playing:
                     self.user_game_history[after.id].add(activity.name)
-                    # تتبع شعبية الألعاب
                     self.game_popularity[activity.name] = self.game_popularity.get(activity.name, 0) + 1
                     self.save_data()
 
-    # ─── TTS helpers ──────────────────────────────────────────────────────────
-
-    async def generate_tts_audio(self, text: str) -> tuple[bytes, str] | None:
-        """توليد صوت بنموذج Gemini TTS. يرجع (bytes, mime_type) أو None."""
-        try:
-            response = await client.aio.models.generate_content(
-                model=TTS_MODEL_NAME,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name=self.current_voice
-                            )
-                        )
-                    )
-                )
-            )
-            part      = response.candidates[0].content.parts[0]
-            audio_data = part.inline_data.data
-            mime_type  = part.inline_data.mime_type
-            print(f"TTS: {len(audio_data)} bytes | mime: {mime_type}")
-            return audio_data, mime_type
-        except Exception as e:
-            print(f"TTS generation error: {e}")
-            return None
-
-    async def play_tts_in_voice(self, member: discord.Member, text: str):
-        """البوت يدخل الفويس يذب بالصوت وبعدين يطلع."""
-        if not member.voice or not member.voice.channel:
-            return
-
-        vc_channel = member.voice.channel
-        result = await self.generate_tts_audio(text)
-        if not result:
-            print("TTS: لا يوجد صوت، تخطي دخول الفويس")
-            return
-        audio_bytes, mime_type = result
-        print(f"TTS: {len(audio_bytes)} bytes | {mime_type}")
-
-        # لو البوت موصول بفويس ثاني نقطعه أول
-        if member.guild.voice_client:
-            await member.guild.voice_client.disconnect(force=True)
-
-        voice_client = None
-        try:
-            import re, audioop
-
-            # استخراج sample rate من mime_type (مثلاً audio/L16;rate=24000)
-            rate_m = re.search(r'rate=(\d+)', mime_type)
-            src_rate = int(rate_m.group(1)) if rate_m else 24000
-
-            # Discord يحتاج 48000Hz 16-bit stereo
-            if src_rate != 48000:
-                pcm_48k, _ = audioop.ratecv(audio_bytes, 2, 1, src_rate, 48000, None)
-            else:
-                pcm_48k = audio_bytes
-
-            # تحويل mono → stereo
-            pcm_stereo = audioop.tostereo(pcm_48k, 2, 1, 1)
-
-            # تشغيل الصوت بدون ffmpeg!
-            audio_io     = io.BytesIO(pcm_stereo)
-            audio_source = discord.PCMAudio(audio_io)
-
-            print(f"TTS: اتصال بالروم '{vc_channel.name}'")
-            voice_client = await vc_channel.connect()
-
-            loop     = asyncio.get_event_loop()
-            finished = asyncio.Event()
-
-            def after_play(error):
-                if error:
-                    print(f"Voice playback error: {error}")
-                loop.call_soon_threadsafe(finished.set)
-
-            voice_client.play(audio_source, after=after_play)
-            print("TTS: شغّل الصوت — ينتظر يخلص")
-            await asyncio.wait_for(finished.wait(), timeout=60)
-            print("TTS: خلص الصوت ✅")
-
-        except asyncio.TimeoutError:
-            print("TTS: تجاوز الوقت (60 ثانية)")
-        except Exception as e:
-            print(f"Voice/TTS Error [{type(e).__name__}]: {e}")
-            print(traceback.format_exc())
-        finally:
-            try:
-                if voice_client and voice_client.is_connected():
-                    await voice_client.disconnect(force=True)
-            except Exception:
-                pass
-
-
-
-    # ─── Roast generation ─────────────────────────────────────────────────────
+    # ─── Roast Generation Core ────────────────────────────────────────────────
 
     async def generate_roast_for_member(
         self,
         member: discord.Member,
-        channel: discord.TextChannel = None,
+        channel: discord.TextChannel,
         custom_topic: str = None,
         custom_intensity: int = None,
-        custom_dialect: str = None,
-        play_audio: bool = True
+        custom_dialect: str = None
     ):
-        if not channel:
-            channel = (
-                self.get_channel(MAIN_CHANNEL_ID)
-                or member.guild.system_channel
-                or (member.guild.text_channels[0] if member.guild.text_channels else None)
-            )
-        if not channel:
-            print("No text channel found.")
-            return
-
-        # ─ حساب وقت الجلوس
-        join_time    = self.vc_join_times.get(member.id, time.time() - 1800)
+        """توليد ذبة ذكية لشخص بناءً على سوابقه ونشاطه ولهجته المختارة."""
+        join_time = self.vc_join_times.get(member.id, time.time())
         minutes_in_vc = int((time.time() - join_time) / 60)
 
-        if minutes_in_vc >= 60:
-            h  = minutes_in_vc // 60
-            m  = minutes_in_vc % 60
-            lbl = {1: "ساعة", 2: "ساعتين"}.get(h, f"{h} ساعات")
-            time_str = f"{lbl} و {m} دقيقة" if m else lbl
-        else:
-            time_str = f"{minutes_in_vc} دقيقة"
+        # تجهيز السياق
+        hours = minutes_in_vc // 60
+        mins = minutes_in_vc % 60
+        time_str = f"{hours} ساعة و {mins} دقيقة" if hours > 0 else f"{mins} دقيقة"
 
-        # ─ الوقت بتوقيت السعودية والموسم الحالي
-        import datetime
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-        current_hour = now.hour
-        current_month = now.month
-        current_day = now.weekday() # 0 = Monday, ..., 6 = Sunday
+        games = list(self.user_game_history.get(member.id, []))
+        game_info = f"يلعب: {', '.join(games)}" if games else "ما يلعب شيء (صنم)"
 
-        if 2 <= current_hour <= 5:
-            time_context = "آخر الليل / الفجر، المفروض نايم."
-        elif 6 <= current_hour <= 11:
-            time_context = "الصبح بدري، الناس تداوم أو تدرس وهو مبلط بالديسكورد."
-        else:
-            time_context = "نص اليوم."
-
-        # الويكند
-        if current_day in [4, 5]: # الجمعة والسبت
-            time_context += " (ويكند والناس تطلع وتنبسط وهو مقابل الشاشة)."
-        else:
-            time_context += " (أيام دوامات والمفروض يخلص أشغاله)."
-
-        # المواسم التقريبية (تتغير حسب السنة، هنا أمثلة ثابتة يمكن تخصيصها)
-        # مثال: إذا كنا في شهر 2 أو 3 (موسم رمضان لعام 2024/2025/2026 مثلاً تقريبياً)
-        if current_month in [2, 3]:
-            time_context += " [ملاحظة للترند: حنا الحين في موسم قريب من رمضان أو أيام صيام، ذب عليه كيف يضيع وقته أو أنه فاطر!]"
-        elif current_month in [6, 7, 8]:
-            time_context += " [ملاحظة للترند: حنا بعز الصيف وحر الرياض/السعودية، والناس تسافر وهو مبلط بغرفته تحت المكيفيلعب!]"
-        elif current_month in [11, 12, 1]:
-            time_context += " [ملاحظة للترند: حنا بالشتاء والبرد وموسم كشتات ومخيمات، بس هو مكوش بغرفته يدفى من حرارة البي سي!]"
-
-        # ─ الألعاب والحالة
-        current_game  = None
-        custom_status = None
-        for act in member.activities:
-            if act.type == discord.ActivityType.playing:
-                current_game = act.name
-                self.user_game_history.setdefault(member.id, set()).add(act.name)
-            elif act.type == discord.ActivityType.custom:
-                custom_status = getattr(act, 'name', None) or getattr(act, 'state', None)
-
-        played_games = self.user_game_history.get(member.id, set())
-        if current_game:
-            game_info = f"يلعب الآن {current_game}."
-        elif len(played_games) > 1:
-            game_info = f"غيّر ألعابه من دخل (لعب {', '.join(played_games)}) وما استقر على شيء."
-        else:
-            game_info = "ما يلعب شيء، مسنتر على الفاضي."
-
-        contradiction = (
-            f"كاتب بحالته '{custom_status}' بس يلعب {current_game}! تناقض واضح."
-            if custom_status and current_game else ""
-        )
-
-        # ─ الصوت والبث وأعضاء الروم
-        mute_info = stream_info = alone_info = ""
-        other_members_info = ""
-        vs = member.voice
-        vc_ch = vs.channel if vs else None
-
-        if vc_ch:
-            others = [m for m in vc_ch.members if not m.bot and m.id != member.id]
-            if len(others) == 0:
-                alone_info = "جالس بالروم لحاله! ما معاه أحد."
+        mute_info = ""
+        if member.voice:
+            if member.voice.self_deaf or member.voice.deaf:
+                mute_info = "مسوي دفن (Deafened) ولا يسمع أحد"
+            elif member.voice.self_mute or member.voice.mute:
+                mute_info = "مسوي ميوت (صامت)"
             else:
-                other_names = " و ".join([f"'{m.display_name}'" for m in others])
-                other_members_info = f"موجودين معاه بالروم: {other_names}. (تقدر تستعين فيهم وتخليهم يشهدون على الذبة أو يضحكون عليه)"
+                mute_info = "المايك مفتوح"
 
-        if vs:
-            if vs.self_stream:
-                stream_info = "فاتح بث (Stream)!"
-                if vc_ch and len([m for m in vc_ch.members if not m.bot]) == 1:
-                    stream_info += " وبالروم ما فيه أحد يتابعه، يبث للجن!"
-            if vs.self_deaf or vs.deaf:
-                if minutes_in_vc >= 120 and not current_game:
-                    mute_info = "مسوي دفن أكثر من ساعتين ولا يلعب شيء، نايم على الكيبورد؟"
-                else:
-                    mute_info = "مسوي دفن (Deafen)، وضعية الصنم."
-            elif vs.self_mute or vs.mute:
-                mute_info = "مسوي ميوت (Mute)، مكمبر ما يتكلم."
-            
-            # تحليل نسبة الكلام بناء على وقت الميوت
-            spk = self.user_speak_history.get(member.id, {"unmuted_sec": 0, "last_unmute": 0})
-            unmuted_time = spk["unmuted_sec"]
-            if spk["last_unmute"] > 0:
-                unmuted_time += (time.time() - spk["last_unmute"])
-            
-            total_time_sec = (minutes_in_vc * 60) or 1
-            speak_ratio = unmuted_time / total_time_sec
-            
-            if speak_ratio > 0.8:
-                mute_info += " (فاك المايك 80% من الوقت، يسولف واجد ومزعج الروم قرقرة!)."
-            elif speak_ratio < 0.2:
-                mute_info += " (قافل المايك أغلب وقته 80%، صنم جالس يسمع بس كأنه بودكاست!)."
+        # تناقض الحالة
+        contradiction = ""
+        for act in member.activities:
+            if act.type == discord.ActivityType.custom and act.name:
+                low = act.name.lower()
+                if any(w in low for w in ["sleep", "نايم", "نوم", "study", "مذاكرة", "busy", "مشغول"]):
+                    contradiction = f"كاتب في حالته: '{act.name}' وهو متواجد ومسهر!"
 
-        # الشخصية المطلوبة
-        persona_prompts = {
-            "troll": "شاب سعودي Gen Z، ذباتك قوية جداً وتكسر الجبهة، طقطوقي ومبدع وتستخدم لغة شارع وجيمنج معربة.",
-            "boomer": "شايب سعودي معصب وقلق، تعتبر الديسكورد والألعاب تضييع وقت وتفاهة، تذب عليهم أنهم جيل ضايع ولا يصلون ومقابلين الشاشات 24 ساعة.",
-            "tryhard": "لاعب إيسبورتس (Esports Tryhard) أجنبي متعالي بس تتكلم عربي مكسر/معرب، تحتقر لعبهم وتشوفهم 'نوبات' وارقامهم K/D فاشلة وأنهم عالة على اللعبة.",
-            "psycho": "شخصية غامضة ومريضة نفسياً، تذبيحاتك هادية بس مرعبة ومستفزة، تتكلم كأنك جني جالس معاهم بالروم ويراقب تفاصيلهم بصمت."
-        }
-        active_persona = persona_prompts.get(self.current_persona, persona_prompts["troll"])
-        if getattr(self, "current_persona_custom", None):
-            active_persona = self.current_persona_custom
-
-        # اختيار عشوائي للتركيز כדי ما تتكرر نفس نمط الذبة والأسلوب يكون متجدد
-        focus_options = [
-            "ركز على مدة جلوسه ووقت السهر كأنه ماعنده مستقبل ولا وظيفة.",
-            "استلم اللعبة اللي يلعبها، ولو غيّر ألعابه اضحك على تشتته وإنه 'نوب' فيهم كلهم.",
-            "ركز على وضعه بالصوت (دفن، ميوت). استهزئ بوضعية الصنم أو إنه خايف يتكلم.",
-            "إذا كان لحاله، اضحك على وحدته. وإذا معاه ناس (استخدم أسمائهم) حرّضهم عليه واستعين فيهم بالذبة.",
-            "قارن بين كلامه الفلسفي بحالته (Custom Status) وبين واقعه البائس بالألعاب.",
-            "ركز على البث إذا كان يبث، اضحك على إنه يبث لأشباح ومافي أحد مهتم.",
-            "أعطه ذبة غير متوقعة تماماً، تشبيه غريب يكسر الجبهة خارج عن المألوف.",
-            "سو نفسك مستغرب من وضعه وقدم له نصيحة ساخرة تقهره.",
-            "العب دور المحقق اللي كشف حقيقته ويفضحه قدام الموجودين بالروم."
-        ]
-        if custom_topic:
-            focus = f"التركيز الإجباري الصارم على هذا الموضوع: [{custom_topic}]"
-        else:
-            focus = random.choice(focus_options)
-
-        # اللهجة المطلوبة
-        chosen_dialect = custom_dialect or getattr(self, "current_dialect", "default")
-        dialect_instruction = get_dialect_prompt(chosen_dialect)
-
-        # مستوى القوة
+        # اللهجة والشخصية
+        active_dialect = custom_dialect or self.current_dialect
+        dialect_instruction = get_dialect_prompt(active_dialect)
+        
         intensity_map = {
-            1: "طقطقة خفيفة ومرحة بدون أي تجريح أو قسوة.",
-            2: "ساركازم واقعي وطقطقة متوازنة ومضحكة.",
-            3: "قصف جبهة مباشر ولاذع وقوي يحجر له.",
-            4: "كتم أنفاس قاسي ومحرج جداً بدون أي مجاملة.",
-            5: "إبادة شاملة: ذبة تدميرية تنهي مسيرته وتفضح كل عيوبه وسوابقه."
+            1: "مداعبة خفيفة وحنونة ولطيفة جداً بدون أي تجريح",
+            2: "طقطقة خفيفة ومرحة وودية",
+            3: "ذبة متوازنة وذكية وسريعة ومحرجة بذكاء",
+            4: "قوية وحارة وقصف جبهة لاذع ومستفز",
+            5: "قصف نووي مدمر بدون أي رحمة وإحراج تام وكشف المستور"
         }
         intensity_desc = intensity_map.get(custom_intensity or 3, intensity_map[3])
 
-        # ملف السوابق
         dossier_context = self.dossier_mgr.format_context_for_roast(member.id)
-
-        # ذاكرة السيرفر
-        recent_chat = self.server_memory.get(member.guild.id, [])
-        chat_context = ""
-        if recent_chat:
-            chat_context = "--- آخر السوالف في السيرفر (استخدمها لو تناسب الذبة) ---\n" + "\n".join(recent_chat[-10:]) + "\n----------------------------------------"
-
-        # نظام الحقد
         grudge_score = self.grudge_levels.get(member.id, 0)
-        grudge_info = ""
-        if grudge_score > 40:
-            grudge_info = f"ملاحظة للمزاج: أنت تحقد حقداً دفيناً على هذا الشخص بشكل مرعب (مستوى الحقد: {grudge_score})! استقصد له وهاجمه بقسوة."
-        elif grudge_score > 10:
-            grudge_info = f"ملاحظة للمزاج: في بينك وبينه عداوة قديمة وتتربص زلاته (مستوى الحقد: {grudge_score})."
+        grudge_info = f"مستوى الحقد المتراكم عليه: {grudge_score}." if grudge_score > 10 else ""
 
-        prompt = (
-            f"أنت تلعب الآن هذا الدور بدقة: [{active_persona}]\n"
-            f"اللهجة المطلوبة بدقة: [{dialect_instruction}]\n"
-            f"مستوى القوة المطلوب: [{intensity_desc}]\n"
-            f"الضحية الحالية: '{member.display_name}'\n\n"
-            f"--- معلومات مفصلة عن وضع الضحية الآن ---\n"
-            f"وقت الجلوس: {time_str} ({time_context})\n"
-            f"الألعاب: {game_info}\n"
-            f"تناقض الحالة: {contradiction}\n"
-            f"حالة الصوت: {mute_info}\n"
-            f"حالة البث: {stream_info}\n"
-            f"وضعه بالروم: {alone_info}\n"
-            f"{other_members_info}\n"
-            f"----------------------------------------\n"
-            f"{chat_context}\n"
-            f"{dossier_context}\n"
-            f"{grudge_info}\n"
-            f"تعليمات إجبارية لهذه الذبة: [{focus}]\n"
-            "مهم جداً: التزم بنسبة 100% باللهجة المطلوبة ومصطلحاتها، لا تستخدم فصحى نهائياً! خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
-        )
+        topic_instruction = f"الموضوع المستهدف للذب: [{custom_topic}]" if custom_topic else "اختر أدق زلة أو تناقض في وضعه الحالي واجلده به."
 
+        prompt = f"""
+أنت 'مستر ذبات 3.0'، أذكى وأقوى بوت طقطقة وسخرية في الديسكورد السعودي.
+الضحية المستهدفة: '{member.display_name}'
+اللهجة الإجبارية: [{dialect_instruction}]
+مستوى القوة: [{intensity_desc}]
+
+--- ملف وبيانات الضحية الآن ---
+- المدة بالفويس: {time_str}
+- النشاط والألعاب: {game_info}
+- وضع المايك: {mute_info}
+- {contradiction}
+{dossier_context}
+{grudge_info}
+-------------------------------
+{topic_instruction}
+
+التعليمات:
+1. التزم بنسبة 100% باللهجة المطلوبة ومصطلحاتها الأصيلة. ممنوع الفصحى نهائياً!
+2. سطرين بالكثير، ذبة لاذعة ومضحكة ومفاجئة تجلد الضحية في مقتل بدون أي مقدمات أو ترحيب.
+"""
         try:
-            response = await generate_content_ai(contents=prompt)
-            roast_text = response.text.strip()
+            resp = await generate_content_ai(contents=prompt)
+            roast_text = resp.text.strip()
 
             await channel.send(f"<@{member.id}> {roast_text}")
             self.last_roasted_user = member.id
 
-            # سجّل آخر 20 ذبة للداشبورد
             self.roast_log.append((time.time(), member.display_name, roast_text))
             self.roast_log = self.roast_log[-100:]
 
-            # تحديث إحصائيات لوحة العار
             self.roast_count_per_user[member.id] = self.roast_count_per_user.get(member.id, 0) + 1
             import datetime
             today = datetime.date.today().isoformat()
             self.daily_roast_counts[today] = self.daily_roast_counts.get(today, 0) + 1
             self.last_roast_time = time.time()
-            
-            # زيادة الحقد
             self.grudge_levels[member.id] = self.grudge_levels.get(member.id, 0) + random.randint(2, 5)
             self.save_data()
-
-            # شغّل الصوت بالفويس إذا كان مطلوباً
-            if play_audio and member.voice and member.voice.channel:
-                asyncio.create_task(self.play_tts_in_voice(member, roast_text))
-
+            return roast_text
         except Exception as e:
             print(f"Roast error: {e}")
+            return None
 
-    # ─── Force random roast ───────────────────────────────────────────────────
+    # ─── Force & Targeted Commands ────────────────────────────────────────────
 
     async def force_random_roast(self, channel: discord.TextChannel = None):
         eligible = []
         for guild in self.guilds:
             for vc in guild.voice_channels:
-                if vc.id == AFK_CHANNEL_ID:
-                    continue  # تجاهل روم AFK
-                for member in vc.members:
-                    if member.bot:
-                        continue
-                    if member.id in self.protected_users:
-                        continue  # محمي من الذبات
-                    tch = (
-                        channel
-                        or self.get_channel(MAIN_CHANNEL_ID)
-                        or guild.system_channel
-                        or (guild.text_channels[0] if guild.text_channels else None)
-                    )
-                    if tch:
-                        eligible.append((member, tch))
+                if vc.id == AFK_CHANNEL_ID: continue
+                for m in vc.members:
+                    if not m.bot and m.id not in self.protected_users:
+                        tch = channel or self.get_channel(MAIN_CHANNEL_ID) or guild.system_channel
+                        if tch:
+                            eligible.append((m, tch))
 
         if not eligible:
-            if channel:
-                await channel.send("ما فيه أحد بالفويس عشان أذب عليه!")
-            return
+            # ابحث في المتواجدين بالسيرفر عموماً
+            for guild in self.guilds:
+                for m in guild.members:
+                    if not m.bot and m.status != discord.Status.offline and m.id not in self.protected_users:
+                        tch = channel or self.get_channel(MAIN_CHANNEL_ID) or guild.system_channel
+                        if tch:
+                            eligible.append((m, tch))
+                            break
 
-        if len(eligible) > 1:
-            no_spam = [m for m in eligible if m[0].id != self.last_roasted_user]
-            if no_spam:
-                eligible = no_spam
+        if eligible:
+            m, tch = random.choice(eligible)
+            await self.generate_roast_for_member(m, tch)
 
-        member, tch = random.choice(eligible)
-        await self.generate_roast_for_member(member, tch)
-
-    # ─── Send custom roast (من الداشبورد) ───────────────────────────────────
+    async def targeted_roast(self, member_id: int, topic: str = None, intensity: int = None, dialect: str = None, play_audio: bool = False):
+        for guild in self.guilds:
+            member = guild.get_member(member_id)
+            if member:
+                ch = self.get_channel(MAIN_CHANNEL_ID) or guild.system_channel or guild.text_channels[0]
+                if ch:
+                    await self.generate_roast_for_member(member, ch, custom_topic=topic, custom_intensity=intensity, custom_dialect=dialect)
+                    return True
+        return False
 
     async def send_custom_roast(self, member_id: int, text: str):
-        """إرسال ذبة يدوية نيابة عن البوت."""
-        channel = self.get_channel(MAIN_CHANNEL_ID)
-        if not channel:
-            return False
+        ch = self.get_channel(MAIN_CHANNEL_ID)
+        if not ch and self.guilds:
+            ch = self.guilds[0].system_channel
+        if not ch: return False
         try:
-            await channel.send(f"<@{member_id}> {text}")
-            # ابحث عن اسم العضو
+            await ch.send(f"<@{member_id}> {text}")
             member_name = str(member_id)
-            for guild in self.guilds:
-                m = guild.get_member(member_id)
-                if m:
-                    member_name = m.display_name
-                    break
+            for g in self.guilds:
+                m = g.get_member(member_id)
+                if m: member_name = m.display_name; break
             self.roast_log.append((time.time(), member_name, text))
-            self.roast_log = self.roast_log[-100:]
             self.roast_count_per_user[member_id] = self.roast_count_per_user.get(member_id, 0) + 1
-            self.grudge_levels[member_id] = self.grudge_levels.get(member_id, 0) + random.randint(1, 4)
             self.last_roast_time = time.time()
             self.save_data()
             return True
@@ -616,53 +404,21 @@ class RoastBot(commands.Bot):
             print(f"Custom roast error: {e}")
             return False
 
-    # ─── Send free message (رسالة حرة) ──────────────────────────────────────
-
     async def send_free_message(self, text: str):
-        """إرسال أي رسالة بالشات نيابة عن البوت."""
-        channel = self.get_channel(MAIN_CHANNEL_ID)
-        if not channel:
-            return False
+        ch = self.get_channel(MAIN_CHANNEL_ID)
+        if not ch and self.guilds:
+            ch = self.guilds[0].system_channel
+        if not ch: return False
         try:
-            await channel.send(text)
+            await ch.send(text)
             return True
         except Exception as e:
-            print(f"Free message error: {e}")
             return False
-
-    # ─── Targeted roast (ذبة موجهة بالـ AI) ──────────────────────────────
-
-    async def targeted_roast(self, member_id: int, topic: str = None, intensity: int = None, dialect: str = None, play_audio: bool = True):
-        """ذبة موجهة بالـ AI لعضو معين مع دعم الموضوع ودرجة القوة واللهجة."""
-        for guild in self.guilds:
-            member = guild.get_member(member_id)
-            if member:
-                channel = (
-                    self.get_channel(MAIN_CHANNEL_ID)
-                    or guild.system_channel
-                    or (guild.text_channels[0] if guild.text_channels else None)
-                )
-                if channel:
-                    await self.generate_roast_for_member(
-                        member, channel,
-                        custom_topic=topic,
-                        custom_intensity=intensity,
-                        custom_dialect=dialect,
-                        play_audio=play_audio
-                    )
-                    return True
-        return False
-
-    # ─── Change roast interval ────────────────────────────────────────
 
     def change_interval(self, min_minutes: int, max_minutes: int):
         self.roast_interval_min = max(30, min(min_minutes, 600))
         self.roast_interval_max = max(self.roast_interval_min, min(max_minutes, 720))
-        if self.roast_loop.is_running():
-            self.roast_loop.change_interval(minutes=random.randint(self.roast_interval_min, self.roast_interval_max))
         return self.roast_interval_min, self.roast_interval_max
-
-    # ─── Toggle roast loop ────────────────────────────────────────────────────
 
     async def toggle_roast_loop(self):
         if self.roast_loop.is_running():
@@ -672,140 +428,38 @@ class RoastBot(commands.Bot):
             self.roast_loop.start()
             return True
 
-    # ─── Auto-roast loop ──────────────────────────────────────────────────────
-
-    @tasks.loop(hours=3)
+    @tasks.loop(hours=2)
     async def roast_loop(self):
-        self.roast_loop.change_interval(minutes=random.randint(self.roast_interval_min, self.roast_interval_max))
         await self.force_random_roast()
-
-    @roast_loop.before_loop
-    async def before_roast_loop(self):
-        await self.wait_until_ready()
-
-    # ─── Daily report loop (4am Saudi = 1am UTC) ─────────────────────────────
 
     @tasks.loop(minutes=60)
     async def daily_report_loop(self):
         current_utc_hour = time.gmtime().tm_hour
-        if current_utc_hour != 1:   # 1am UTC = 4am Saudi
+        if current_utc_hour != 1:  # 4am Saudi
             return
+        ch = self.get_channel(MAIN_CHANNEL_ID)
+        if not ch and self.guilds:
+            ch = self.guilds[0].system_channel
+        if not ch: return
 
-        channel = self.get_channel(MAIN_CHANNEL_ID)
-        if not channel:
-            return
-
-        # اجمع إحصائيات الناس اللي سهروا
         lines = []
-        for guild in self.guilds:
-            # أعضاء لسا بالفويس
-            for uid, jt in self.vc_join_times.items():
-                m = guild.get_member(uid)
+        for uid, mins in self.daily_stats.items():
+            for g in self.guilds:
+                m = g.get_member(uid)
                 if m:
-                    mins = self.daily_stats.get(uid, 0) + int((time.time() - jt) / 60)
-                    lines.append(f"{m.display_name}: {mins} دقيقة")
-            # أعضاء طلعوا
-            for uid, mins in self.daily_stats.items():
-                if uid not in self.vc_join_times:
-                    m = guild.get_member(uid)
-                    if m:
-                        lines.append(f"{m.display_name}: {mins} دقيقة طلع من زمان")
+                    lines.append(f"{m.display_name}: {mins} دقيقة سهر")
+                    break
 
-        stats_text = "\n".join(lines) if lines else "الكل نام بدري الليلة!"
-
-        report_prompt = (
-            f"أنت مستر ذبات. اكتب تقرير يومي كوميدي بعامية سعودية عن هؤلاء السهرانين:\n"
-            f"{stats_text}\n\n"
-            "التقرير: طقطقة بدون رحمة، يذكر كل شخص، أسلوب تيك توك/تويتر، 3-5 أسطر، بدون مقدمات."
-        )
-
+        stats_text = "\n".join(lines) if lines else "الكل نايم بدري ومسوي صحي!"
+        prompt = f"أنت مستر ذبات. اكتب تقرير مسائي ساخر جداً بعامية سعودية شبابية عن هؤلاء السهرانين:\n{stats_text}\n3 أسطر، طقطقة بدون رحمة."
         try:
-            response = await generate_content_ai(contents=report_prompt)
-            await channel.send(f"📊 **تقرير مستر ذبات اليومي 🌙**\n\n{response.text.strip()}")
+            resp = await generate_content_ai(contents=prompt)
+            await ch.send(f"📊 **تقرير الفضائح الليلي 🌙**\n\n{resp.text.strip()}")
         except Exception as e:
-            print(f"Daily report error: {e}")
-
-        # إعادة تعيين الإحصائيات اليومية
+            print(f"Report error: {e}")
         self.daily_stats.clear()
 
-    @daily_report_loop.before_loop
-    async def before_daily_report(self):
-        await self.wait_until_ready()
-
-    # ─── Proactive Audio Loop (التسلل للفويس) ────────────────────────────────
-
-    @tasks.loop(minutes=10)
-    async def proactive_audio_loop(self):
-        if not getattr(self, "voice_proactive_audio", False) or not self.voice_join_allowed:
-            return
-            
-        # ابحث عن مدمني الألعاب (سهرانين أكثر من 4 ساعات)
-        hardcore_gamer = None
-        hardcore_vc = None
-        for guild in self.guilds:
-            if guild.id in self.voice_sessions: continue
-            for vc in guild.voice_channels:
-                if vc.id == AFK_CHANNEL_ID: continue
-                for m in vc.members:
-                    if not m.bot and not m.voice.self_deaf and not m.voice.deaf:
-                        join_time = self.vc_join_times.get(m.id, time.time())
-                        mins = int((time.time() - join_time) / 60)
-                        if mins >= 180 and m.activities: # 3 ساعات أو 4 ساعات (نخليها 3 أحسن للضحك)
-                            hardcore_gamer = m
-                            hardcore_vc = vc
-                            break
-                if hardcore_gamer: break
-            if hardcore_gamer: break
-
-        # فرصة 30% كل 10 دقائق عشان ما يكون مزعج جداً (إلا لو فيه مدمن ألعاب ندش فوراً بنسبة أعلى)
-        if not hardcore_gamer and random.random() > 0.3:
-            return
-
-        target_guild = hardcore_gamer.guild if hardcore_gamer else None
-        target_vc = hardcore_vc
-
-        if not target_vc:
-            eligible_vcs = []
-            for guild in self.guilds:
-                if guild.id in self.voice_sessions:
-                    continue
-                for vc in guild.voice_channels:
-                    if vc.id == AFK_CHANNEL_ID: continue
-                    members = [m for m in vc.members if not m.bot and not (m.voice.self_deaf or m.voice.deaf)]
-                    if len(members) >= 2:
-                        eligible_vcs.append((guild, vc))
-
-            if not eligible_vcs:
-                return
-            target_guild, target_vc = random.choice(eligible_vcs)
-
-        try:
-            session = VoiceChatSession(
-                bot=self,
-                guild_id=target_guild.id,
-                voice_channel=target_vc,
-                text_channel=target_guild.system_channel or target_vc,
-                requester=target_guild.me,
-            )
-            # البوت يراقب بصمت مؤقتاً
-            self.voice_sessions[target_guild.id] = session
-            asyncio.create_task(session.start())
-            
-            ch = self.get_channel(MAIN_CHANNEL_ID) or target_guild.system_channel
-            if ch:
-                if hardcore_gamer:
-                    await ch.send(f"🥷 مستر ذبات متوجه للفويس لأن {hardcore_gamer.display_name} جالس 3+ ساعات متواصلة! لازم يتهزأ ويلمس العشب!")
-                else:
-                    await ch.send("🥷 مستر ذبات دخل الفويس يتسمع عليكم...")
-                
-        except Exception as e:
-            print(f"Proactive Audio Error: {e}")
-
-    @proactive_audio_loop.before_loop
-    async def before_proactive_audio(self):
-        await self.wait_until_ready()
-
-    # ─── Voice chat commands ────────────────────────────────────────────
+    # ─── On Message (Images & Chat) ───────────────────────────────────────────
 
     async def on_message(self, message):
         if message.author.bot:
@@ -813,13 +467,12 @@ class RoastBot(commands.Bot):
 
         content = message.content.strip()
 
-        # تحديث ذاكرة السيرفر
         if message.guild:
             self.server_memory.setdefault(message.guild.id, [])
             self.server_memory[message.guild.id].append(f"{message.author.display_name}: {content}")
-            self.server_memory[message.guild.id] = self.server_memory[message.guild.id][-50:]
+            self.server_memory[message.guild.id] = self.server_memory[message.guild.id][-40:]
 
-        # ذبات بصرية (Vision & Multimodal)
+        # ذبات الصور (Vision)
         mentioned = self.user in message.mentions
         starts_with_look = content.startswith("!شوف") or content.startswith("بوت شوف")
         if message.attachments and (mentioned or starts_with_look):
@@ -828,90 +481,177 @@ class RoastBot(commands.Bot):
                     prompt = (
                         "أنت 'مستر ذبات'، شخصيتك طقطوقي سعودي لاذع. "
                         "قام المستخدم برفع هذه الصورة لك لتعلق عليها. "
-                        "حلل تفاصيل الصورة بدقة (مثل ترتيب السيت-أب، نتيجة اللعب، إلخ)، ووجه ذبة قوية ومضحكة جداً لصاحبها بناءً على ما تراه. "
-                        "تكلم بلهجة سعودية عامية وبدون مقدمات، سطرين بالكثير."
+                        "حلل تفاصيل الصورة بدقة واقصف جبهة صاحبها بأسلوب سعودي مضحك جداً وبدون مقدمات."
                     )
                     try:
-                        image_bytes = await att.read()
-                        part = types.Part.from_bytes(data=image_bytes, mime_type=att.content_type)
+                        img_bytes = await att.read()
+                        part = types.Part.from_bytes(data=img_bytes, mime_type=att.content_type)
                         async with message.channel.typing():
-                            response = await generate_content_ai(contents=[prompt, part])
-                            roast_text = response.text.strip()
+                            resp = await generate_content_ai(contents=[prompt, part])
+                            roast_text = resp.text.strip()
                             await message.reply(roast_text)
-                            
                             self.roast_log.append((time.time(), message.author.display_name, roast_text))
-                            self.roast_log = self.roast_log[-100:]
                             self.roast_count_per_user[message.author.id] = self.roast_count_per_user.get(message.author.id, 0) + 1
-                            self.grudge_levels[message.author.id] = self.grudge_levels.get(message.author.id, 0) + random.randint(2, 5)
-                            self.last_roast_time = time.time()
                             self.save_data()
-                            
-                            # شغّل الصوت بالفويس إذا كان موجود
-                            if message.author.voice and message.author.voice.channel:
-                                asyncio.create_task(self.play_tts_in_voice(message.author, roast_text))
                     except Exception as e:
-                        print(f"Vision roast error: {e}")
                         await message.reply("ما قدرت أشوف الصورة زين، شكلها مصورة بكاميرا ساهر!")
                     return
-
-        # بوت تعال – البوت يدخل الفويس ويبدأ محادثة صوتية
-        if content in ("بوت تعال", "بوت تعالي", "يا بوت تعال"):
-            if not self.voice_join_allowed:
-                await message.channel.send("🔒 المحادثة الصوتية معطلة حالياً.")
-                return
-            if not HAS_VOICE_RECV:
-                await message.channel.send("❌ مكتبة استقبال الصوت غير مثبتة.")
-                return
-            if not message.author.voice or not message.author.voice.channel:
-                await message.channel.send("🔈 ادخل روم فويس أول!")
-                return
-            if message.author.voice.channel.id == AFK_CHANNEL_ID:
-                await message.channel.send("❌ ما أقدر أدخل روم AFK.")
-                return
-            if message.guild.id in self.voice_sessions:
-                await message.channel.send("🎙️ أنا أصلاً بالروم!")
-                return
-
-            session = VoiceChatSession(
-                bot=self,
-                guild_id=message.guild.id,
-                voice_channel=message.author.voice.channel,
-                text_channel=message.channel,
-                requester=message.author,
-            )
-            self.voice_sessions[message.guild.id] = session
-            asyncio.create_task(session.start())
-            return
-
-        # بوت روح – البوت يطلع من الفويس
-        if content in ("بوت روح", "بوت اطلع", "يا بوت روح"):
-            session = self.voice_sessions.get(message.guild.id)
-            if session:
-                await session.stop(reason="طلب من " + message.author.display_name)
-            return
 
         await self.process_commands(message)
 
 
-# ─── Bot instance ─────────────────────────────────────────────────────────────
+# ─── Bot Instance ─────────────────────────────────────────────────────────────
 
 bot = RoastBot()
 
 
-@bot.tree.command(name="dashboard", description="Admin control panel for Mr. Dhabat")
-async def dashboard(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_USER_ID:
-        await interaction.response.send_message("غير مصرح لك.", ephemeral=True)
-        return
+# ─── Discord Slash Commands ───────────────────────────────────────────────────
 
-    view = DashboardView(
-        bot=bot,
-        toggle_loop_callback=bot.toggle_roast_loop,
-        force_roast_callback=bot.force_random_roast,
-        generate_roast_callback=bot.generate_roast_for_member
+@bot.tree.command(name="roast", description="🎯 إطلاق ذبة ذكية موجهة على عضو")
+@app_commands.describe(
+    member="العضو المستهدف للجلد",
+    topic="موضوع الذبة أو سبب القصف (اختياري)",
+    dialect="اختر اللهجة المطلوبة للذبة",
+    intensity="مستوى القوة من 1 (خفيف) إلى 5 (إبادة نووية)"
+)
+@app_commands.choices(dialect=[
+    app_commands.Choice(name="⚡ عامية سعودية معاصرة", value="default"),
+    app_commands.Choice(name="🇸🇦 لهجة الرياض / نجدية", value="riyadh"),
+    app_commands.Choice(name="🌴 لهجة جدة / حجازية", value="jeddah"),
+    app_commands.Choice(name="🌾 لهجة القصيم", value="qassim")
+])
+@app_commands.choices(intensity=[
+    app_commands.Choice(name="1 - مداعبة خفيفة 😊", value=1),
+    app_commands.Choice(name="2 - طقطقة ودية 😉", value=2),
+    app_commands.Choice(name="3 - متوازنة وذكية 🎯", value=3),
+    app_commands.Choice(name="4 - قوية وحارة 🔥", value=4),
+    app_commands.Choice(name="5 - قصف نووي بدون رحمة 💥💀", value=5)
+])
+async def cmd_roast(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    topic: str = None,
+    dialect: app_commands.Choice[str] = None,
+    intensity: app_commands.Choice[int] = None
+):
+    await interaction.response.defer()
+    d_val = dialect.value if dialect else bot.current_dialect
+    i_val = intensity.value if intensity else 3
+
+    roast = await bot.generate_roast_for_member(
+        member,
+        interaction.channel,
+        custom_topic=topic,
+        custom_intensity=i_val,
+        custom_dialect=d_val
     )
-    await interaction.response.send_message("🕹️ **لوحة تحكم مستر ذبات**", view=view, ephemeral=True)
+    if roast:
+        await interaction.followup.send(f"🚀 تم إطلاق الذبة على {member.mention} بنجاح!", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ حدث خطأ أثناء تجهيز الذبة.", ephemeral=True)
 
+
+@bot.tree.command(name="court", description="⚖️ فتح جلسة محاكمة علنية طارئة ضد عضو مع تصويت الأعضاء")
+@app_commands.describe(
+    defendant="المتهم المراد محاكمته",
+    charge="التهمة الموجهة له (مثلاً: الصنم الأبدي، تخريب الرانك، ادعاء النوم)",
+    dialect="اللهجة التي سيحكم بها رئيس المحكمة"
+)
+@app_commands.choices(dialect=[
+    app_commands.Choice(name="⚡ عامية سعودية", value="default"),
+    app_commands.Choice(name="🇸🇦 نجدية / الرياض", value="riyadh"),
+    app_commands.Choice(name="🌴 حجازية / جدة", value="jeddah"),
+    app_commands.Choice(name="🌾 قصيمية", value="qassim")
+])
+async def cmd_court(
+    interaction: discord.Interaction,
+    defendant: discord.Member,
+    charge: str,
+    dialect: app_commands.Choice[str] = None
+):
+    await interaction.response.defer()
+    d_val = dialect.value if dialect else bot.current_dialect
+
+    indictment_data = await bot.roast_engine.generate_trial_indictment(defendant.display_name, charge, dialect=d_val)
+    
+    embed = discord.Embed(
+        title=f"⚖️ {indictment_data.get('title', 'محكمة السيرفر العليا')}",
+        description=f"**المتهم في قفص الاتهام:** {defendant.mention}\n**التهمة المنسوبة إليه:** {charge}\n\n📜 **لائحة الادعاء:**\n{indictment_data.get('indictment', '')}\n\n⚖️ **العقوبة المقترحة:**\n{indictment_data.get('penalty', '')}",
+        color=0xff2a5f
+    )
+    embed.set_thumbnail(url=defendant.display_avatar.url)
+    embed.set_footer(text="التصويت مفتوح لمدة 90 ثانية • صوت بالأزرار بالأسفل")
+
+    view = CourtVoteView(defendant.id, defendant.display_name, charge, bot)
+    await interaction.followup.send(content=f"🚨 **محاكمة علنية طارئة ضد {defendant.mention}!**", embed=embed, view=view)
+
+
+@bot.tree.command(name="shamecard", description="🎴 إصدار بطاقة العار الرسمية الرقمية لعضو")
+@app_commands.describe(
+    member="العضو المطلوب إصدار بطاقة العار له",
+    dialect="اللهجة المكتوبة بها بطاقة العار"
+)
+async def cmd_shamecard(interaction: discord.Interaction, member: discord.Member, dialect: str = "default"):
+    await interaction.response.defer()
+    card_data = bot.dossier_mgr.get_shame_card_data(member.id, member.display_name, str(member.display_avatar.url))
+    
+    # توليد الذبة لبطاقة العار
+    roast_prompt = f"أنت مستr ذبات. اكتب ذبة لبطاقة العار الرسمية للعضو '{member.display_name}' عن جريمته '{card_data.get('crime')}'. سطر واحد قوي جداً بلهجة {dialect}."
+    try:
+        resp = await generate_content_ai(contents=roast_prompt)
+        roast_txt = resp.text.strip()
+    except Exception:
+        roast_txt = f"أشهر تصريفاته: {card_data.get('top_excuse')}"
+
+    svg_code = bot.roast_engine.generate_shame_card_svg(card_data, roast_txt, DIALECTS.get(dialect, DIALECTS['default'])['badge'])
+    file_bytes = io.BytesIO(svg_code.encode("utf-8"))
+    discord_file = discord.File(file_bytes, filename=f"shame_card_{member.id}.svg")
+
+    embed = discord.Embed(
+        title=f"🎴 بطاقة العار الرسمية: {member.display_name}",
+        description=f"**اللقب:** {card_data.get('title')}\n**التهمة:** {card_data.get('crime')}\n\n**الإحصائيات الساخرة:**\n• نسبة التصريف: `{card_data['stats']['excuses']}%`\n• دقة الإيم: `{card_data['stats']['aim']}%`\n• معدل النكبة: `{card_data['stats']['choke']}%`\n• ساعات النوم: `{card_data['stats']['sleep']} ساعة`\n\n🎯 **الحكم:**\n\"{roast_txt}\"",
+        color=0xa855f7
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.followup.send(file=discord_file, embed=embed)
+
+
+@bot.tree.command(name="battle", description="⚔️ بدء حلبة تحدي ذبات بين عضوين مع تحكيم الذكاء الاصطناعي")
+@app_commands.describe(
+    opponent1="المتحدي الأول",
+    opponent2="المتحدي الثاني",
+    topic="موضوع المعركة (اختياري)"
+)
+async def cmd_battle(interaction: discord.Interaction, opponent1: discord.Member, opponent2: discord.Member, topic: str = "تحدي حر"):
+    await interaction.response.defer()
+    prompt = f"""
+أنت حكم حلبة الذبات الأسطوري.
+اكتب جولة افتتاحية مستفزة وحماسية لمعركة ذبات بين:
+1. {opponent1.display_name}
+2. {opponent2.display_name}
+موضوع النزاع: {topic}
+أسلوب معلق مصارعة سعودي فكاهي ومولع، سطرين. اطلب من كل واحد يرمي ذبته الآن!
+"""
+    resp = await generate_content_ai(contents=prompt)
+    await interaction.followup.send(f"⚔️ **حلبة مصارعة الذبات 1v1** ⚔️\n\n**{opponent1.mention} ضد {opponent2.mention}**\nالموضوع: {topic}\n\n{resp.text.strip()}\n\n🔔 كل متسابق يكتب ذبته في الشات الآن والحكم بيفصل بينكم!")
+
+
+@bot.tree.command(name="dialect", description="🗣️ تغيير اللهجة التلقائية للبوت")
+@app_commands.describe(dialect="اختر اللهجة الجديدة")
+@app_commands.choices(dialect=[
+    app_commands.Choice(name="⚡ عامية سعودية عامة (Default)", value="default"),
+    app_commands.Choice(name="🇸🇦 لهجة الرياض / نجدية", value="riyadh"),
+    app_commands.Choice(name="🌴 لهجة جدة / حجازية", value="jeddah"),
+    app_commands.Choice(name="🌾 لهجة القصيم", value="qassim")
+])
+async def cmd_dialect(interaction: discord.Interaction, dialect: app_commands.Choice[str]):
+    bot.current_dialect = dialect.value
+    bot.save_data()
+    d_name = DIALECTS[dialect.value]["name"]
+    await interaction.response.send_message(f"✅ تم تحويل لهجة مستر ذبات الرسمية إلى: **{d_name}** 🗣️")
+
+
+# ─── Main Startup ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not GEMINI_API_KEY:
