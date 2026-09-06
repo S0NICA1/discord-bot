@@ -1020,3 +1020,19 @@ async def test_dashboard_reports_roast_loop_active(web_client, test_bot):
     if test_bot.roast_loop.is_running():
         await test_bot.toggle_roast_loop()
 
+
+@pytest.mark.asyncio
+async def test_roast_interval_random_6_or_12_hours(test_bot):
+    """Test autonomous roast intervals are randomly chosen between 6 and 12 hours."""
+    assert test_bot.roast_interval_choices == [6, 12]
+    assert test_bot.roast_interval_min == 360
+    assert test_bot.roast_interval_max == 720
+
+    # Simulate randomized picks across cycles
+    import random
+    picks = {random.choice(test_bot.roast_interval_choices) for _ in range(50)}
+    assert 6 in picks
+    assert 12 in picks
+    assert picks == {6, 12}
+
+

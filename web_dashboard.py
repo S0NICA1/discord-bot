@@ -202,8 +202,9 @@ async def handle_stats(request):
             "protected": protected_list,
             "last_roast_time": getattr(bot, "last_roast_time", None),
             "next_roast_in": next_roast_in,
-            "interval_min": getattr(bot, "roast_interval_min", 120),
-            "interval_max": getattr(bot, "roast_interval_max", 240),
+            "interval_min": getattr(bot, "roast_interval_min", 360),
+            "interval_max": getattr(bot, "roast_interval_max", 720),
+            "interval_choices": getattr(bot, "roast_interval_choices", [6, 12]),
             "current_dialect": getattr(bot, "current_dialect", "default"),
             "dialects": dialects_data,
             "alerts": alerts,
@@ -232,8 +233,9 @@ async def handle_stats(request):
             "protected": [],
             "last_roast_time": None,
             "next_roast_in": 0,
-            "interval_min": 120,
-            "interval_max": 240,
+            "interval_min": 360,
+            "interval_max": 720,
+            "interval_choices": [6, 12],
             "current_dialect": "default",
             "dialects": [],
             "alerts": [],
@@ -2169,8 +2171,14 @@ function renderDashboard(data) {
   // HUD
   document.getElementById('hudTotalRoasts').innerText = data.total_roasts || 0;
   document.getElementById('hudActiveVc').innerText = data.members_in_vc ? data.members_in_vc.length : 0;
-  document.getElementById('hudCurrentDialect').innerText = (data.current_dialect || 'default').toUpperCase();
-  document.getElementById('hudNextRoast').innerText = `${data.next_roast_in || 0} د`;
+  const nextMin = data.next_roast_in || 0;
+  if (nextMin >= 60) {
+    const hrs = Math.floor(nextMin / 60);
+    const remMin = nextMin % 60;
+    document.getElementById('hudNextRoast').innerText = remMin > 0 ? `${hrs} س ${remMin} د` : `${hrs} ساعات`;
+  } else {
+    document.getElementById('hudNextRoast').innerText = `${nextMin} د`;
+  }
   document.getElementById('vcCountBadge').innerText = `${data.members_in_vc ? data.members_in_vc.length : 0} أهداف`;
 
   // Loop button

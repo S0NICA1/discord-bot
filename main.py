@@ -134,8 +134,9 @@ class RoastBot(commands.Bot):
 
         self.protected_users      = set()
         self.last_roast_time      = None
-        self.roast_interval_min   = 120
-        self.roast_interval_max   = 240
+        self.roast_interval_min   = 360   # 6 hours
+        self.roast_interval_max   = 720   # 12 hours
+        self.roast_interval_choices = [6, 12]  # in hours (random 6h or 12h)
         self.current_persona      = "troll"
         self.current_persona_custom = None
         self.current_dialect      = "default"
@@ -589,11 +590,14 @@ class RoastBot(commands.Bot):
             return False
 
     def change_interval(self, min_minutes: int, max_minutes: int):
-        self.roast_interval_min = max(30, min(min_minutes, 600))
-        self.roast_interval_max = max(self.roast_interval_min, min(max_minutes, 720))
+        self.roast_interval_min = max(30, min(min_minutes, 1440))
+        self.roast_interval_max = max(self.roast_interval_min, min(max_minutes, 1440))
+        min_hrs = max(1, int(self.roast_interval_min / 60))
+        max_hrs = max(min_hrs, int(self.roast_interval_max / 60))
+        self.roast_interval_choices = [min_hrs, max_hrs] if min_hrs != max_hrs else [min_hrs]
         if hasattr(self, "roast_loop") and self.roast_loop:
-            next_interval = random.randint(self.roast_interval_min, self.roast_interval_max)
-            self.roast_loop.change_interval(minutes=next_interval)
+            next_hours = random.choice(self.roast_interval_choices)
+            self.roast_loop.change_interval(hours=next_hours)
         return self.roast_interval_min, self.roast_interval_max
 
     async def toggle_roast_loop(self):
@@ -608,11 +612,14 @@ class RoastBot(commands.Bot):
             self.roast_loop.start()
             return True
 
-    @tasks.loop(hours=2)
+    @tasks.loop(hours=6)
     async def roast_loop(self):
         try:
-            next_interval = random.randint(self.roast_interval_min, self.roast_interval_max)
-            self.roast_loop.change_interval(minutes=next_interval)
+            # Independent random selection: 6h or 12h (e.g. 6 -> 6 -> 12)
+            choices = getattr(self, "roast_interval_choices", [6, 12])
+            next_hours = random.choice(choices)
+            self.roast_loop.change_interval(hours=next_hours)
+            logger.info(f"Autonomous roast loop: scheduled next iteration in {next_hours} hours.")
             await self.force_random_roast()
         except Exception as e:
             logger.error(f"Error during autonomous roast cycle: {e}")
@@ -620,6 +627,9 @@ class RoastBot(commands.Bot):
     @roast_loop.before_loop
     async def before_roast_loop(self):
         try:
+            choices = getattr(self, "roast_interval_choices", [6, 12])
+            next_hours = random.choice(choices)
+            self.roast_loop.change_interval(hours=next_hours)
             await self.wait_until_ready()
         except Exception:
             pass
