@@ -12,6 +12,8 @@ import discord
 from aiohttp import web
 from google import genai
 from google.genai import types
+from modules.dialects import DIALECTS, get_dialect_prompt
+from modules.dossier import dossier_mgr
 
 AFK_CHANNEL_ID = 782986605148635166
 
@@ -142,6 +144,18 @@ async def handle_stats(request):
         "voice_sessions_active": len(getattr(bot, "voice_sessions", {})),
         "voice_session_log": getattr(bot, "voice_session_log", [])[-20:],
         "voice_ignored": [{"id":uid,"name":str(uid)} for uid in getattr(bot, "voice_ignored_users", set())],
+        "current_dialect": getattr(bot, "current_dialect", "default"),
+        "dialects": [
+            {
+                "id": k,
+                "name": v["name"],
+                "region": v["region"],
+                "icon": v["icon"],
+                "badge": v["badge"],
+                "catchphrase": v["catchphrases"][0]
+            }
+            for k, v in DIALECTS.items()
+        ],
     }
     
     # تحذيرات الإدمن (AI Alerts)
@@ -202,12 +216,72 @@ async def handle_targeted_roast(request):
     bot = request.app["bot"]
     try:
         body = await request.json()
-        mid = int(body.get("member_id",0))
-        if not mid: return web.Response(text='{"ok":false}', content_type="application/json")
-        ok = await bot.targeted_roast(mid)
-        return web.Response(text=json.dumps({"ok":ok}), content_type="application/json")
+        mid = int(body.get("member_id", 0))
+        topic = body.get("topic", "").strip() or None
+        intensity = int(body.get("intensity", 3))
+        dialect = body.get("dialect", "").strip() or None
+        play_audio = bool(body.get("play_audio", True))
+        if not mid:
+            return web.Response(text='{"ok":false,"error":"العضو غير محدد"}', content_type="application/json")
+        ok = await bot.targeted_roast(
+            mid,
+            topic=topic,
+            intensity=intensity,
+            dialect=dialect,
+            play_audio=play_audio
+        )
+        return web.Response(text=json.dumps({"ok": ok}), content_type="application/json")
     except Exception as e:
-        return web.Response(text=json.dumps({"ok":False,"error":str(e)}), content_type="application/json")
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_change_dialect(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        dialect = body.get("dialect", "default")
+        if dialect in DIALECTS:
+            bot.current_dialect = dialect
+            bot.save_data()
+            return web.Response(
+                text=json.dumps({"ok": True, "dialect": dialect, "name": DIALECTS[dialect]["name"]}),
+                content_type="application/json"
+            )
+        return web.Response(text=json.dumps({"ok": False, "error": "اللهجة غير صالحة"}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_dossier(request):
+    bot = request.app["bot"]
+    try:
+        mid = request.query.get("member_id")
+        if not mid:
+            return web.Response(text=json.dumps({"ok": False, "error": "No member_id"}), content_type="application/json")
+        dossier = bot.dossier_mgr.get_user_dossier(mid)
+        return web.Response(text=json.dumps({"ok": True, "dossier": dossier}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
+
+
+async def handle_add_dossier_item(request):
+    bot = request.app["bot"]
+    try:
+        body = await request.json()
+        mid = body.get("member_id")
+        item_type = body.get("type", "excuse")
+        content = body.get("content", "").strip()
+        if not mid or not content:
+            return web.Response(text=json.dumps({"ok": False, "error": "بيانات ناقصة"}), content_type="application/json")
+        if item_type == "excuse":
+            bot.dossier_mgr.add_excuse(mid, content)
+        elif item_type == "title":
+            bot.dossier_mgr.add_title(mid, content)
+        elif item_type == "moment":
+            bot.dossier_mgr.add_moment(mid, content)
+        return web.Response(text=json.dumps({"ok": True, "dossier": bot.dossier_mgr.get_user_dossier(mid)}), content_type="application/json")
+    except Exception as e:
+        return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
 async def handle_change_interval(request):
@@ -606,6 +680,27 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .pulse{animation:pulse 2s ease-in-out infinite}
+
+/* Dialects */
+.dialect-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.8rem;margin-top:.6rem}
+.dialect-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1rem;cursor:pointer;transition:all .2s;position:relative}
+.dialect-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.dialect-card.active{border-color:var(--accent);background:linear-gradient(135deg,rgba(244,63,94,.12),rgba(168,85,247,.12));box-shadow:0 0 16px rgba(244,63,94,.25)}
+.dialect-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem}
+.dialect-name{font-weight:700;font-size:.9rem;display:flex;align-items:center;gap:.4rem}
+.dialect-badge{font-size:.68rem;padding:.12rem .5rem;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--muted)}
+.dialect-desc{font-size:.74rem;color:var(--muted);line-height:1.4}
+.dialect-quote{font-size:.72rem;color:var(--accent2);margin-top:.4rem;background:rgba(255,255,255,.03);padding:.25rem .5rem;border-radius:6px;border-right:2px solid var(--accent)}
+.dialect-active-indicator{position:absolute;top:-8px;left:10px;background:var(--accent);color:#fff;font-size:.65rem;font-weight:700;padding:.1rem .5rem;border-radius:10px;display:none}
+.dialect-card.active .dialect-active-indicator{display:block}
+
+/* Dossier Modal */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(5px);z-index:1000;display:none;align-items:center;justify-content:center;padding:1rem}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;max-width:540px;width:100%;max-height:85vh;overflow-y:auto;box-shadow:0 20px 40px rgba(0,0,0,.5);animation:fadeIn .2s ease}
+.modal-head{padding:1rem 1.3rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-body{padding:1.3rem}
+.dossier-tag{display:inline-block;padding:.2rem .6rem;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:.75rem;margin:.2rem}
 </style>
 </head>
 <body>
@@ -619,6 +714,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     <div class="sub" id="loop-status">جاري التحميل...</div>
   </div>
   <div class="header-actions">
+    <span id="header-dialect" class="badge badge-purple" style="font-size:.76rem;padding:.35rem .7rem;cursor:pointer" onclick="showPage('control')" title="اضغط لتغيير اللهجة">🗣️ عامية</span>
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙</button>
   </div>
 </div>
@@ -645,6 +741,24 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       <div class="stat-card"><div class="stat-icon cyan">⏳</div><div><div class="stat-value" id="s-uptime">0</div><div class="stat-label">دقيقة شغّال</div></div></div>
       <div class="stat-card"><div class="stat-icon yellow">⏭️</div><div><div class="stat-value" id="s-next">—</div><div class="stat-label">الذبة الجاية</div></div></div>
     </div>
+
+    <!-- Quick Dialect Bar in Overview -->
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:.8rem 1.2rem;margin-bottom:1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.8rem">
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <span style="font-size:1.3rem">🗣️</span>
+        <div>
+          <div style="font-weight:700;font-size:.88rem">اللهجة التلقائية الحالية: <span id="ov-dialect-name" style="color:var(--accent);font-weight:900">عامية</span></div>
+          <div style="font-size:.72rem;color:var(--muted)">تحدد أسلوب ومفردات الذبات والمحادثات الصوتية فوراً</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap" id="ov-dialect-btns">
+        <button class="btn btn-sm" onclick="changeDialect('default')" id="btn-dial-default">⚡ عامية</button>
+        <button class="btn btn-sm" onclick="changeDialect('riyadh')" id="btn-dial-riyadh">🇸🇦 الرياض</button>
+        <button class="btn btn-sm" onclick="changeDialect('jeddah')" id="btn-dial-jeddah">🌴 جدة</button>
+        <button class="btn btn-sm" onclick="changeDialect('qassim')" id="btn-dial-qassim">🌾 القصيم</button>
+      </div>
+    </div>
+
     <div class="grid">
       <div class="card">
         <div class="card-head"><h2>🎧 بالفويس الحين</h2><span class="badge badge-green" id="vc-count">0</span></div>
@@ -659,6 +773,74 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
   <!-- ═══ PAGE: CONTROL ═══ -->
   <div class="page" id="page-control">
+    <!-- Dialect Selector Card -->
+    <div class="card full" style="margin-bottom:1.5rem">
+      <div class="card-head">
+        <h2>🗣️ اختيار لهجة البوت التلقائية (Dialect Control)</h2>
+        <span class="badge badge-purple" id="ctrl-dialect-badge">عامية</span>
+      </div>
+      <div class="card-body">
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:.5rem">
+          اختر اللهجة التي سيعتمدها البوت في الذبات التلقائية والردود الصوتية. اضغط على أي بطاقة لتفعيلها فوراً:
+        </p>
+        <div class="dialect-grid" id="dialect-grid"></div>
+      </div>
+    </div>
+
+    <!-- Smart Roast Launcher -->
+    <div class="card full" style="margin-bottom:1.5rem">
+      <div class="card-head">
+        <h2>🚀 منصة إطلاق الذبات الذكية (Smart Roast Launcher)</h2>
+        <span class="badge badge-red">Gemini Thinking High 🔥</span>
+      </div>
+      <div class="card-body">
+        <div class="grid" style="grid-template-columns:1fr 1fr;gap:1.2rem">
+          <div>
+            <div class="form-group">
+              <label>🎯 الضحية المستهدفة</label>
+              <select id="smart-roast-target"><option value="">اختر عضو...</option></select>
+            </div>
+            <div class="form-group">
+              <label>🗣️ تخصيص اللهجة لهذه الذبة (اختياري)</label>
+              <select id="smart-roast-dialect">
+                <option value="">نفس لهجة البوت الحالية</option>
+                <option value="default">⚡ عامية سعودية (Default)</option>
+                <option value="riyadh">🇸🇦 لهجة الرياض / نجدية</option>
+                <option value="jeddah">🌴 لهجة جدة / حجازية</option>
+                <option value="qassim">🌾 لهجة القصيم</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>🔥 مستوى القسوة: <span id="lbl-intensity" style="color:var(--accent);font-weight:900">3 - متوازنة 🎯</span></label>
+              <input type="range" id="smart-roast-intensity" min="1" max="5" value="3" oninput="updateIntensityLabel(this.value)">
+            </div>
+            <div class="form-group" style="margin-top:.8rem">
+              <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none;font-size:.82rem">
+                <input type="checkbox" id="smart-roast-audio" checked style="width:auto;accent-color:var(--accent)">
+                <span>تشغيل الذبة صوتياً بالفويس إذا كان متواجداً 🔊</span>
+              </label>
+            </div>
+          </div>
+          <div>
+            <div class="form-group">
+              <label>💡 موضوع الذبة وسياقها (اختياري)</label>
+              <select id="smart-roast-preset" onchange="applyTopicPreset(this.value)" style="margin-bottom:.4rem">
+                <option value="">-- أفكار جاهزة سريعة --</option>
+                <option value="صنم بالفويس من زمان وما يتكلم">صنم بالفويس وما يتكلم</option>
+                <option value="لعب نوب وخسر الرانك والكل يعاني منه">لعب نوب وتخريب الرانك</option>
+                <option value="سهران ومسوي فيها مشغول وما ينام">سهران ومسوي فيها مشغول</option>
+                <option value="دافن المايك وعايش في عالم موازي">مسوي دفن وسابح بعالمه</option>
+                <option value="dossier">استخدم ملف الفضائح والسوابق حقه</option>
+              </select>
+              <textarea id="smart-roast-topic" placeholder="اكتب فكرة الذبة أو اتركه فارغاً والـ AI سيبحث في نشاطه وسوابقه ويجلده..."></textarea>
+            </div>
+            <button class="btn btn-red" style="width:100%;margin-top:.5rem;padding:.7rem;font-size:.88rem;justify-content:center" onclick="launchSmartRoast()" id="btn-smart-roast">🚀 أطلق الذبة الذكية</button>
+            <p id="smart-roast-msg" style="font-size:.75rem;min-height:1rem;margin-top:.4rem"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="grid">
       <div class="card">
         <div class="card-head"><h2>🕹️ أوامر سريعة</h2></div>
@@ -667,13 +849,6 @@ input[type=range]{width:100%;accent-color:var(--accent)}
             <button class="btn btn-red" onclick="forceRoast()">⚡ ذب الحين (عشوائي)</button>
             <button class="btn btn-yellow" onclick="toggleLoop()" id="btn-toggle">⏯️ إيقاف/تشغيل</button>
             <button class="btn" onclick="loadData()">🔄 تحديث</button>
-          </div>
-          <div class="form-group">
-            <label>🎯 ذبة موجهة (AI يولّد الذبة)</label>
-            <div style="display:flex;gap:.5rem">
-              <select id="target-member" style="flex:1"><option value="">اختر عضو</option></select>
-              <button class="btn btn-red btn-sm" onclick="targetedRoast()">🎯 ذب</button>
-            </div>
           </div>
           <div class="form-group" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
             <label>🤖 شخصية البوت (يتغير أسلوب الذبة)</label>
@@ -846,6 +1021,21 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         <div class="card-head"><h2>👥 كل الأعضاء</h2><span class="badge badge-purple" id="total-members">0</span></div>
         <div class="card-body" id="all-members-list"><div class="empty">جاري التحميل...</div></div>
       </div>
+      <div class="card full" style="margin-top:1.5rem">
+        <div class="card-head">
+          <h2>📂 ملفات السوابق والفضائح (Criminal Dossiers)</h2>
+          <span class="badge badge-purple">ذاكرة البوت الشخصية</span>
+        </div>
+        <div class="card-body">
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem">
+            اختر أي عضو للاطلاع على سجل سوابقه وأعذاره وتصريفاته المسجلة لدى البوت، أو إضافة مواقف محرجة وألقاب جديدة له:
+          </p>
+          <div style="display:flex;gap:.5rem;max-width:420px">
+            <select id="dossier-member-select"><option value="">اختر عضواً لعرض ملفه...</option></select>
+            <button class="btn btn-purple btn-sm" onclick="openSelectedDossier()">📂 فتح الملف</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -978,6 +1168,47 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
 </div>
 
+<!-- Dossier Modal -->
+<div class="modal-backdrop" id="dossier-modal" onclick="if(event.target===this)closeDossierModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <img id="dm-avatar" src="" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--accent)">
+        <div>
+          <h3 id="dm-name" style="font-size:.95rem;font-weight:700">ملف العضو</h3>
+          <span style="font-size:.7rem;color:var(--muted)" id="dm-id">ID</span>
+        </div>
+      </div>
+      <button class="btn btn-sm" onclick="closeDossierModal()" style="border:none;background:transparent;font-size:1.1rem;cursor:pointer">✖</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:1.2rem">
+        <h4 style="font-size:.82rem;color:var(--yellow);margin-bottom:.4rem">👑 الألقاب الساخرة المعروفة</h4>
+        <div id="dm-titles" style="display:flex;gap:.4rem;flex-wrap:wrap"><span class="badge">لا يوجد</span></div>
+      </div>
+      <div style="margin-bottom:1.2rem">
+        <h4 style="font-size:.82rem;color:var(--blue);margin-bottom:.4rem">🤥 أشهر الأعذار والتصريفات</h4>
+        <div id="dm-excuses" style="display:flex;flex-direction:column;gap:.3rem"><span style="font-size:.75rem;color:var(--muted)">لا يوجد</span></div>
+      </div>
+      <div style="margin-bottom:1.2rem">
+        <h4 style="font-size:.82rem;color:var(--accent);margin-bottom:.4rem">🙈 مواقف محرجة وفضائح مسجلة</h4>
+        <div id="dm-moments" style="display:flex;flex-direction:column;gap:.3rem"><span style="font-size:.75rem;color:var(--muted)">لا يوجد</span></div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:1rem 0">
+      <h4 style="font-size:.82rem;color:var(--green);margin-bottom:.5rem">➕ إضافة معلومة جديدة لملف العار</h4>
+      <div class="form-group">
+        <select id="dm-add-type" style="margin-bottom:.4rem">
+          <option value="excuse">🤥 تصريفة / عذر مشهور</option>
+          <option value="moment">🙈 موقف محرج / فضيحة</option>
+          <option value="title">👑 لقب ساخر جديد</option>
+        </select>
+        <input type="text" id="dm-add-text" placeholder="اكتب المعلومة هنا ليستخدمها البوت في الذب...">
+      </div>
+      <button class="btn btn-green btn-sm" style="width:100%;justify-content:center" onclick="addDossierItem()">💾 حفظ في الملف</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let D={}, dailyChartInstance=null, allRoasts=[];
 
@@ -1092,7 +1323,7 @@ async function loadData(){
       if(m.speak_ratio > 70) spkTag = `<span title="مزعج الروم" style="font-size:.7rem; color:var(--accent);">🔊 يسولف واجد (${m.speak_ratio}%)</span>`;
       else if(m.speak_ratio < 10 && m.minutes > 5 && !m.muted && !m.deafened) spkTag = `<span title="صنم" style="font-size:.7rem; color:var(--muted);">💤 صامت (${m.speak_ratio}%)</span>`;
 
-      return `<div class="member"><div class="member-avatar"><img src="${m.avatar}"><div class="status-dot status-${m.status||'offline'}"></div></div><div class="member-info"><div class="member-name">${m.name} ${tags.join(' ')}</div><div class="member-meta"><span>📍 ${m.channel}</span><span>⏱️ ${fmtDur(m.minutes)}</span> ${spkTag}</div></div></div>`;
+      return `<div class="member"><div class="member-avatar"><img src="${m.avatar}"><div class="status-dot status-${m.status||'offline'}"></div></div><div class="member-info"><div class="member-name">${m.name} ${tags.join(' ')}</div><div class="member-meta"><span>📍 ${m.channel}</span><span>⏱️ ${fmtDur(m.minutes)}</span> ${spkTag}</div></div><div style="display:flex;gap:.3rem;align-items:center;margin-right:auto"><button class="btn btn-sm" onclick="quickSmartRoast('${m.id}')" title="ذب عليه الآن" style="padding:.25rem .55rem;font-size:.72rem">🎯 ذب</button><button class="btn btn-sm" onclick="openDossierModal('${m.id}', '${m.name.replace(/'/g, "\\'")}', '${m.avatar}')" title="فتح ملف السوابق" style="padding:.25rem .55rem;font-size:.72rem">📂 ملفه</button></div></div>`;
     }).join('')}
 
     // Shame board
@@ -1109,7 +1340,10 @@ async function loadData(){
           <span style="font-weight:700;font-size:.85rem">${s.name}</span>
           <span style="font-size:.65rem;color:var(--accent)">${grad ? grad + ' ('+s.grudge+')' : 'مستوى الحقد: '+s.grudge}</span>
         </div>
-        <span class="shame-count">${s.count} ذبة</span>
+        <div style="display:flex;align-items:center;gap:.4rem;margin-right:auto">
+          <button class="btn btn-sm" onclick="openDossierModal('${s.id}', '${s.name.replace(/'/g, "\\'")}', '${s.avatar}')" title="ملف السوابق" style="padding:.2rem .45rem;font-size:.7rem">📂</button>
+          <span class="shame-count">${s.count} ذبة</span>
+        </div>
       </div>`;
     }).join('')}
 
@@ -1118,7 +1352,15 @@ async function loadData(){
 
     // Dropdowns
     const opts='<option value="">— اختر —</option>'+D.all_members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
-    ['roast-target','target-member','prot-select'].forEach(id=>document.getElementById(id).innerHTML=opts);
+    ['roast-target','target-member','smart-roast-target','prot-select','dossier-member-select'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.innerHTML=opts;
+    });
+
+    // Dialects
+    if(D.current_dialect && D.dialects){
+      renderDialects(D.current_dialect, D.dialects);
+    }
 
     // Games
     const gl=document.getElementById('games-list');
@@ -1256,10 +1498,225 @@ async function sendFree(){
 }
 
 async function targetedRoast(){
-  const mid=document.getElementById('target-member').value;
+  const mid=document.getElementById('target-member')?.value || document.getElementById('smart-roast-target')?.value;
   if(!mid){showMsg('status-msg','⚠️ اختر عضو');return}
   await fetch('/api/targeted_roast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:mid})});
   toast('ذبة موجهة انطلقت! 🎯','ok');setTimeout(loadData,3000);
+}
+
+// ─── Dialect Control ─────────────────────────
+function renderDialects(currentDialect, dialects){
+  const cur = (dialects||[]).find(d => d.id === currentDialect) || (dialects ? dialects[0] : null);
+  const headerD = document.getElementById('header-dialect');
+  if(headerD) headerD.textContent = '🗣️ ' + (cur ? cur.badge : 'عامية');
+  const ovD = document.getElementById('ov-dialect-name');
+  if(ovD) ovD.textContent = cur ? cur.name : 'عامية';
+  const ctrlD = document.getElementById('ctrl-dialect-badge');
+  if(ctrlD) ctrlD.textContent = cur ? cur.name : 'عامية';
+
+  // Overview quick buttons
+  ['default','riyadh','jeddah','qassim'].forEach(id => {
+    const b = document.getElementById('btn-dial-' + id);
+    if(b){
+      if(id === currentDialect){
+        b.className = 'btn btn-sm btn-red';
+      } else {
+        b.className = 'btn btn-sm';
+      }
+    }
+  });
+
+  // Dialect Grid Cards
+  const grid = document.getElementById('dialect-grid');
+  if(grid && dialects){
+    grid.innerHTML = dialects.map(d => {
+      const isActive = d.id === currentDialect;
+      return `<div class="dialect-card ${isActive ? 'active' : ''}" onclick="changeDialect('${d.id}')">
+        <span class="dialect-active-indicator">● مفعلة حالياً</span>
+        <div class="dialect-card-top">
+          <div class="dialect-name"><span>${d.icon}</span> <span>${d.name}</span></div>
+          <span class="dialect-badge">${d.badge}</span>
+        </div>
+        <div class="dialect-desc">المنطقة: ${d.region}</div>
+        <div class="dialect-quote">"${d.catchphrase}"</div>
+      </div>`;
+    }).join('');
+  }
+}
+
+async function changeDialect(dialectId){
+  try {
+    const r = await fetch('/api/change_dialect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dialect: dialectId})
+    });
+    const d = await r.json();
+    if(d.ok){
+      toast('تم تغيير لهجة البوت إلى: ' + d.name + ' 🗣️', 'ok');
+      loadData();
+    } else {
+      toast('فشل تغيير اللهجة: ' + (d.error || ''), 'error');
+    }
+  } catch(e) {
+    toast('خطأ في الاتصال بالسيرفر', 'error');
+  }
+}
+
+// ─── Smart Roast Launcher ────────────────────
+function updateIntensityLabel(val){
+  const labels = {
+    "1": "1 - مداعبة خفيفة وحنونة 😊",
+    "2": "2 - طقطقة خفيفة وودية 😉",
+    "3": "3 - متوازنة وذكية 🎯",
+    "4": "4 - قوية وحارة 🔥",
+    "5": "5 - قصف نووي بدون رحمة 💥💀"
+  };
+  const el = document.getElementById('lbl-intensity');
+  if(el) el.textContent = labels[val] || val;
+}
+
+function applyTopicPreset(val){
+  if(!val || val === 'custom') return;
+  const topicBox = document.getElementById('smart-roast-topic');
+  if(val === 'dossier'){
+    topicBox.value = 'نبش في ملف فضائحه وسوابقه وأعذاره واجلده بها';
+  } else {
+    topicBox.value = val;
+  }
+}
+
+function quickSmartRoast(mid){
+  showPage('control');
+  const sel = document.getElementById('smart-roast-target');
+  if(sel) sel.value = mid;
+  window.scrollTo({top: 200, behavior: 'smooth'});
+}
+
+async function launchSmartRoast(){
+  const mid = document.getElementById('smart-roast-target').value;
+  if(!mid){
+    showMsg('smart-roast-msg', '⚠️ اختر الضحية أولاً');
+    return;
+  }
+  const dialect = document.getElementById('smart-roast-dialect').value;
+  const intensity = document.getElementById('smart-roast-intensity').value;
+  const topic = document.getElementById('smart-roast-topic').value.trim();
+  const playAudio = document.getElementById('smart-roast-audio').checked;
+
+  const btn = document.getElementById('btn-smart-roast');
+  btn.textContent = '⏳ جاري التفكير وإطلاق الذبة...';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch('/api/targeted_roast', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        member_id: mid,
+        dialect: dialect || null,
+        intensity: parseInt(intensity),
+        topic: topic || null,
+        play_audio: playAudio
+      })
+    });
+    const d = await r.json();
+    if(d.ok){
+      toast('تم إطلاق الذبة بنجاح! 🎯🔥', 'ok');
+      showMsg('smart-roast-msg', '✅ تم إرسال الذبة!');
+      setTimeout(loadData, 2500);
+    } else {
+      showMsg('smart-roast-msg', '❌ ' + (d.error || 'فشل'));
+    }
+  } catch(e) {
+    showMsg('smart-roast-msg', '❌ خطأ بالاتصال');
+  }
+  btn.textContent = '🚀 أطلق الذبة الذكية';
+  btn.disabled = false;
+}
+
+// ─── User Dossier Modal ──────────────────────
+let currentDossierMid = null;
+
+async function openDossierModal(mid, name, avatar){
+  currentDossierMid = mid;
+  document.getElementById('dm-name').textContent = name || 'عضو';
+  document.getElementById('dm-id').textContent = 'ID: ' + mid;
+  document.getElementById('dm-avatar').src = avatar || '';
+  document.getElementById('dossier-modal').classList.add('open');
+
+  document.getElementById('dm-titles').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
+  document.getElementById('dm-excuses').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
+  document.getElementById('dm-moments').innerHTML = '<span style="color:var(--muted);font-size:.75rem">جاري التحميل...</span>';
+
+  try {
+    const r = await fetch('/api/dossier?member_id=' + mid);
+    const d = await r.json();
+    if(d.ok && d.dossier){
+      renderDossierData(d.dossier);
+    }
+  } catch(e){
+    console.error(e);
+  }
+}
+
+function renderDossierData(d){
+  const titles = d.titles || [];
+  const excuses = d.excuses || [];
+  const moments = d.embarrassing_moments || [];
+
+  const tEl = document.getElementById('dm-titles');
+  tEl.innerHTML = titles.length ? titles.map(t => `<span class="badge badge-yellow">👑 ${t}</span>`).join(' ') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد ألقاب مسجلة</span>';
+
+  const eEl = document.getElementById('dm-excuses');
+  eEl.innerHTML = excuses.length ? excuses.map(e => `<div class="dossier-tag" style="border-right:3px solid var(--blue)">🤥 "${e}"</div>`).join('') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد أعذار مسجلة</span>';
+
+  const mEl = document.getElementById('dm-moments');
+  mEl.innerHTML = moments.length ? moments.map(m => `<div class="dossier-tag" style="border-right:3px solid var(--accent)">🙈 ${m}</div>`).join('') : '<span style="font-size:.75rem;color:var(--muted)">لا توجد فضائح مسجلة</span>';
+}
+
+function closeDossierModal(){
+  document.getElementById('dossier-modal').classList.remove('open');
+  currentDossierMid = null;
+}
+
+function openSelectedDossier(){
+  const sel = document.getElementById('dossier-member-select');
+  const mid = sel.value;
+  if(!mid){ toast('اختر عضواً أولاً', 'error'); return; }
+  const opt = sel.options[sel.selectedIndex];
+  const name = opt ? opt.text : 'عضو';
+  const mem = (D.all_members||[]).find(m => String(m.id) === String(mid));
+  openDossierModal(mid, name, mem ? mem.avatar : '');
+}
+
+async function addDossierItem(){
+  if(!currentDossierMid) return;
+  const typ = document.getElementById('dm-add-type').value;
+  const txt = document.getElementById('dm-add-text').value.trim();
+  if(!txt){ toast('اكتب النص أولاً', 'error'); return; }
+
+  try {
+    const r = await fetch('/api/dossier/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        member_id: currentDossierMid,
+        type: typ,
+        content: txt
+      })
+    });
+    const d = await r.json();
+    if(d.ok && d.dossier){
+      renderDossierData(d.dossier);
+      document.getElementById('dm-add-text').value = '';
+      toast('تم حفظ المعلومة في ملف العار! 📂', 'ok');
+    } else {
+      toast('فشل الحفظ: ' + (d.error||''), 'error');
+    }
+  } catch(e){
+    toast('خطأ بالاتصال', 'error');
+  }
 }
 
 async function changeInterval(){
@@ -1392,6 +1849,9 @@ def create_web_app(bot_instance) -> web.Application:
     app.router.add_post("/api/change_interval",handle_change_interval)
     app.router.add_post("/api/change_voice",  handle_change_voice)
     app.router.add_post("/api/change_persona",handle_change_persona)
+    app.router.add_post("/api/change_dialect",handle_change_dialect)
+    app.router.add_get("/api/dossier",        handle_dossier)
+    app.router.add_post("/api/dossier/add",   handle_add_dossier_item)
     app.router.add_post("/api/voice_settings", handle_voice_settings)
     app.router.add_post("/api/voice_ignore",   handle_voice_ignore)
     app.router.add_post("/api/voice_kick",     handle_voice_kick)

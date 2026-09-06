@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_THINKING_LEVEL, GEMINI_TOOLS
+from modules.dialects import get_dialect_prompt
 import modules.config_sync as config_sync
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,8 @@ def update_history(guild_id: int, user_text: str, model_text: str):
     if len(history) > 20:
         chat_history[guild_id] = history[-20:]
 
-def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc_members_count: int = 1, afk_users: list = None) -> str:
-    """Gets a response from Gemini using the guild's history and Tony's Persona."""
+def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc_members_count: int = 1, afk_users: list = None, dialect: str = "default") -> str:
+    """Gets a response from Gemini using the guild's history, Tony's Persona, and the chosen dialect."""
     
     if not afk_users:
         afk_users = []
@@ -70,6 +71,9 @@ def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc
     # Format the user's prompt to include context for spatial/temporal awareness
     formatted_prompt = f"[System Context -> Time: {time_str} | Users in Room: {vc_members_count}{afk_str}{black_book_str} | Friendship Hint: {friendship_status}] {user_name} says: {text}"
     
+    dialect_instruction = get_dialect_prompt(dialect)
+    full_persona = f"{config_sync.get_persona()}\n\n[تعليمات اللهجة الإجبارية: {dialect_instruction}]"
+
     try:
         contents = history.copy()
         contents.append({"role": "user", "parts": [{"text": formatted_prompt}]})
@@ -79,7 +83,7 @@ def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc
                 model=GEMINI_MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    system_instruction=config_sync.get_persona(),
+                    system_instruction=full_persona,
                     temperature=config_sync.get_temperature(),
                     thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
                     tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -91,7 +95,7 @@ def generate_response(guild_id: int, user_id: int, user_name: str, text: str, vc
                 model=GEMINI_MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    system_instruction=config_sync.get_persona(),
+                    system_instruction=full_persona,
                     temperature=config_sync.get_temperature(),
                     thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
                 )

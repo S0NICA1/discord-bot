@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 from dashboard_ui import DashboardView
 from web_dashboard import start_web_server
 from voice_chat import VoiceChatSession, HAS_VOICE_RECV
+from modules.dialects import DIALECTS, get_dialect_prompt
+from modules.dossier import dossier_mgr
 
 # Load environment variables
 load_dotenv()
@@ -89,6 +91,8 @@ class RoastBot(commands.Bot):
         self.current_voice       = "Kore" # الصوت الحالي للـ TTS (Kore, Aoede, Puck...)
         self.current_persona     = "troll" # شخصية البوت (troll, boomer, tryhard, psycho)
         self.current_persona_custom = None # إذا تم إنشاء شخصية بصرية عبر الداشبورد
+        self.current_dialect     = "default" # اللهجة الحالية (default, riyadh, jeddah, qassim)
+        self.dossier_mgr         = dossier_mgr
         self.user_speak_history  = {}     # {user_id: {"unmuted_sec": 0, "last_unmute": 0}} لتتبع نسبة الكلام
         self.server_memory       = {}     # {guild_id: [رسالة]} ذاكرة السيرفر للتعليق عليها
 
@@ -116,6 +120,7 @@ class RoastBot(commands.Bot):
                 self.hourly_vc_activity = data.get("hourly_vc_activity", [0]*24)
                 self.game_popularity = data.get("game_popularity", {})
                 self.grudge_levels = {int(k): v for k, v in data.get("grudge_levels", {}).items()}
+                self.current_dialect = data.get("current_dialect", "default")
         except Exception:
             pass
 
@@ -127,7 +132,8 @@ class RoastBot(commands.Bot):
                 "daily_roast_counts": self.daily_roast_counts,
                 "hourly_vc_activity": self.hourly_vc_activity,
                 "game_popularity": self.game_popularity,
-                "grudge_levels": self.grudge_levels
+                "grudge_levels": self.grudge_levels,
+                "current_dialect": self.current_dialect
             }
             with open(self.data_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -315,7 +321,15 @@ class RoastBot(commands.Bot):
 
     # ─── Roast generation ─────────────────────────────────────────────────────
 
-    async def generate_roast_for_member(self, member: discord.Member, channel: discord.TextChannel = None):
+    async def generate_roast_for_member(
+        self,
+        member: discord.Member,
+        channel: discord.TextChannel = None,
+        custom_topic: str = None,
+        custom_intensity: int = None,
+        custom_dialect: str = None,
+        play_audio: bool = True
+    ):
         if not channel:
             channel = (
                 self.get_channel(MAIN_CHANNEL_ID)
@@ -454,7 +468,27 @@ class RoastBot(commands.Bot):
             "سو نفسك مستغرب من وضعه وقدم له نصيحة ساخرة تقهره.",
             "العب دور المحقق اللي كشف حقيقته ويفضحه قدام الموجودين بالروم."
         ]
-        focus = random.choice(focus_options)
+        if custom_topic:
+            focus = f"التركيز الإجباري الصارم على هذا الموضوع: [{custom_topic}]"
+        else:
+            focus = random.choice(focus_options)
+
+        # اللهجة المطلوبة
+        chosen_dialect = custom_dialect or getattr(self, "current_dialect", "default")
+        dialect_instruction = get_dialect_prompt(chosen_dialect)
+
+        # مستوى القوة
+        intensity_map = {
+            1: "طقطقة خفيفة ومرحة بدون أي تجريح أو قسوة.",
+            2: "ساركازم واقعي وطقطقة متوازنة ومضحكة.",
+            3: "قصف جبهة مباشر ولاذع وقوي يحجر له.",
+            4: "كتم أنفاس قاسي ومحرج جداً بدون أي مجاملة.",
+            5: "إبادة شاملة: ذبة تدميرية تنهي مسيرته وتفضح كل عيوبه وسوابقه."
+        }
+        intensity_desc = intensity_map.get(custom_intensity or 3, intensity_map[3])
+
+        # ملف السوابق
+        dossier_context = self.dossier_mgr.format_context_for_roast(member.id)
 
         # ذاكرة السيرفر
         recent_chat = self.server_memory.get(member.guild.id, [])
@@ -472,7 +506,8 @@ class RoastBot(commands.Bot):
 
         prompt = (
             f"أنت تلعب الآن هذا الدور بدقة: [{active_persona}]\n"
-            f"مهمتك: ذبة لاذعة جداً، لا تكرر أسلوبك القديم.\n"
+            f"اللهجة المطلوبة بدقة: [{dialect_instruction}]\n"
+            f"مستوى القوة المطلوب: [{intensity_desc}]\n"
             f"الضحية الحالية: '{member.display_name}'\n\n"
             f"--- معلومات مفصلة عن وضع الضحية الآن ---\n"
             f"وقت الجلوس: {time_str} ({time_context})\n"
@@ -484,9 +519,10 @@ class RoastBot(commands.Bot):
             f"{other_members_info}\n"
             f"----------------------------------------\n"
             f"{chat_context}\n"
+            f"{dossier_context}\n"
             f"{grudge_info}\n"
             f"تعليمات إجبارية لهذه الذبة: [{focus}]\n"
-            "مهم جداً: خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
+            "مهم جداً: التزم بنسبة 100% باللهجة المطلوبة ومصطلحاتها، لا تستخدم فصحى نهائياً! خلها سطرين بالكثير، ذبة لاذعة تستفزه وتضحك اللي بالروم. بدون أي مقدمات (زي 'يا فلان') أو شروحات، ادخل بالذبة اللكمة مباشرة!"
         )
 
         try:
@@ -511,8 +547,8 @@ class RoastBot(commands.Bot):
             self.grudge_levels[member.id] = self.grudge_levels.get(member.id, 0) + random.randint(2, 5)
             self.save_data()
 
-            # شغّل الصوت بالفويس
-            if member.voice and member.voice.channel:
+            # شغّل الصوت بالفويس إذا كان مطلوباً
+            if play_audio and member.voice and member.voice.channel:
                 asyncio.create_task(self.play_tts_in_voice(member, roast_text))
 
         except Exception as e:
@@ -596,14 +632,24 @@ class RoastBot(commands.Bot):
 
     # ─── Targeted roast (ذبة موجهة بالـ AI) ──────────────────────────────
 
-    async def targeted_roast(self, member_id: int):
-        """ذبة موجهة بالـ AI لعضو معين."""
+    async def targeted_roast(self, member_id: int, topic: str = None, intensity: int = None, dialect: str = None, play_audio: bool = True):
+        """ذبة موجهة بالـ AI لعضو معين مع دعم الموضوع ودرجة القوة واللهجة."""
         for guild in self.guilds:
             member = guild.get_member(member_id)
             if member:
-                channel = self.get_channel(MAIN_CHANNEL_ID)
+                channel = (
+                    self.get_channel(MAIN_CHANNEL_ID)
+                    or guild.system_channel
+                    or (guild.text_channels[0] if guild.text_channels else None)
+                )
                 if channel:
-                    await self.generate_roast_for_member(member, channel)
+                    await self.generate_roast_for_member(
+                        member, channel,
+                        custom_topic=topic,
+                        custom_intensity=intensity,
+                        custom_dialect=dialect,
+                        play_audio=play_audio
+                    )
                     return True
         return False
 
