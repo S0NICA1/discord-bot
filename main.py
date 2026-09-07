@@ -140,6 +140,7 @@ class RoastBot(commands.Bot):
         self.current_persona      = "troll"
         self.current_persona_custom = None
         self.current_dialect      = "default"
+        self.dialect_engine       = dialect_engine
         self.roast_engine         = roast_engine
         self.server_memory        = {}
         self.user_speak_history   = {}

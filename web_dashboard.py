@@ -22,7 +22,7 @@ import discord
 from aiohttp import web
 from google import genai
 from google.genai import types
-from modules.dialects import DIALECTS, get_dialect_prompt, get_comparative_prompt
+from modules.dialects import DIALECTS, get_dialect_prompt, get_comparative_prompt, dialect_engine
 from modules.dossier import dossier_mgr
 from modules.roast_engine import roast_engine
 from modules.ai_service import generate_content_ai
@@ -537,22 +537,13 @@ async def handle_battle_judge(request):
 
 async def handle_dialect_preview(request):
     """توليد مقارنة فورية بين الـ 4 لهجات في نفس الوقت على موضوع محدد."""
-    bot = request.app["bot"]
     try:
         body = await request.json()
         topic = body.get("topic", "واحد سحب علينا بالرانك وجاء اليوم الثاني كأنه ما صار شيء").strip()
         member_name = body.get("member_name", "العضو المستهدف").strip()
 
-        if hasattr(bot, "dialect_engine") and bot.dialect_engine:
-            comparisons = await bot.dialect_engine.generate_comparative(member_name, topic)
-        else:
-            prompt = get_comparative_prompt(topic, member_name)
-            resp = await generate_content_ai(contents=prompt)
-            raw_text = resp.text.replace('```json', '').replace('```', '').strip()
-            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-            if match:
-                raw_text = match.group(0)
-            comparisons = json.loads(raw_text)
+        engine = getattr(request.app.get("bot"), "dialect_engine", dialect_engine) or dialect_engine
+        comparisons = await engine.generate_comparative(member_name, topic)
 
         return web.Response(text=json.dumps({"ok": True, "comparisons": comparisons}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
