@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import discord
 from aiohttp import web
@@ -542,12 +543,20 @@ async def handle_dialect_preview(request):
         topic = body.get("topic", "واحد سحب علينا بالرانك وجاء اليوم الثاني كأنه ما صار شيء").strip()
         member_name = body.get("member_name", "العضو المستهدف").strip()
 
-        prompt = get_comparative_prompt(topic, member_name)
-        resp = await generate_content_ai(contents=prompt)
-        text = resp.text.replace('```json', '').replace('```', '').strip()
-        comparisons = json.loads(text)
+        if hasattr(bot, "dialect_engine") and bot.dialect_engine:
+            comparisons = await bot.dialect_engine.generate_comparative(member_name, topic)
+        else:
+            prompt = get_comparative_prompt(topic, member_name)
+            resp = await generate_content_ai(contents=prompt)
+            raw_text = resp.text.replace('```json', '').replace('```', '').strip()
+            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            if match:
+                raw_text = match.group(0)
+            comparisons = json.loads(raw_text)
+
         return web.Response(text=json.dumps({"ok": True, "comparisons": comparisons}, ensure_ascii=False), content_type="application/json")
     except Exception as e:
+        logger.error(f"Error in handle_dialect_preview: {e}")
         return web.Response(text=json.dumps({"ok": False, "error": str(e)}), content_type="application/json")
 
 
@@ -570,6 +579,9 @@ async def handle_ai_report(request):
         )
         response = await generate_content_ai(contents=prompt)
         text = response.text.replace('```json', '').replace('```', '').strip()
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            text = match.group(0)
         data = json.loads(text)
         return web.Response(text=json.dumps({"ok": True, "report": data}, ensure_ascii=False), content_type="application/json")
     except Exception as e:

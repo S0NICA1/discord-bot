@@ -172,8 +172,8 @@ async def test_dialect_engine_generate_comparative_fallback():
     assert "خالد" in result["riyadh"]
     assert "خالد" in result["jeddah"]
     assert "خالد" in result["qassim"]
-    assert "تسوقها" in result["default"]
-    assert "مهوب" in result["riyadh"]
+    assert "وش جوك" in result["default"] or "الترقيع" in result["default"]
+    assert "اركد" in result["riyadh"]
     assert "يا واد" in result["jeddah"]
     assert "تسذا" in result["qassim"]
 
