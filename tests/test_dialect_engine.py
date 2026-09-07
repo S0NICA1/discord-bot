@@ -194,3 +194,16 @@ def test_backward_compatible_functions():
     assert "riyadh" in comp_prompt
     assert "jeddah" in comp_prompt
     assert "qassim" in comp_prompt
+
+
+def test_anti_hostility_and_comedy_first_constraints():
+    """Verify negative constraints forbid toxic/hostile arguing phrases and enforce comedy."""
+    banned_toxic = ["خلك ساكت", "انثبر", "وضعك مزري", "النفسية"]
+    for word in banned_toxic:
+        assert word in NEGATIVE_CONSTRAINTS
+
+    for dialect_key in ["default", "riyadh", "jeddah", "qassim"]:
+        d = DIALECTS[dialect_key]
+        assert d["metrics"]["humor"] >= 90
+        assert "ضحك" in d["instructions"] or "فكاهية" in d["instructions"] or "كوميدي" in d["instructions"]
+
